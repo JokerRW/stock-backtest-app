@@ -58,6 +58,26 @@ strategies = {
             "訊號線": 9
         }
     },
+    "布林通道策略": {
+        "description": "當收盤價上穿布林通道上軌時買入，下穿下軌時賣出。",
+        "parameters": {
+            "期間": 20,
+            "標準差倍數": 2.0
+        }
+    },
+        "黃金交叉 EMA 策略": {
+        "description": "短期 EMA 上穿長期 EMA 為黃金交叉（買入），反之為死亡交叉（賣出）。",
+        "parameters": {
+            "短期 EMA": 12,
+            "長期 EMA": 26
+        }
+    },
+        "唐奇安通道策略": {
+        "description": "收盤價突破過去 N 日最高價買入，跌破最低價賣出。",
+        "parameters": {
+            "期間": 20
+        }
+    },
 }
 
 def apply_strategy(df, strategy_name, params):
@@ -83,7 +103,7 @@ def apply_strategy(df, strategy_name, params):
     elif strategy_name == "突破策略":
         period = int(params["突破天數"])
         if len(df) < period + 5:
-            raise ValueError(f"📉 資料天數過短（目前 {len(df)} 天），「突破策略」至少需要 {period + 5} 天。")
+            raise ValueError(f"\U0001F4C9 資料天數過短（目前 {len(df)} 天），「突破策略」至少需要 {period + 5} 天。")
         df['High_N'] = df['Close'].rolling(window=period, min_periods=period).max()
         df['Low_N'] = df['Close'].rolling(window=period, min_periods=period).min()
         buy = (df['Close'] > df['High_N'].shift(1)).fillna(False)
@@ -114,9 +134,30 @@ def apply_strategy(df, strategy_name, params):
         buy = ((df['MACD'] > df['Signal']) & (df['MACD'].shift(1) <= df['Signal'].shift(1))).fillna(False)
         sell = ((df['MACD'] < df['Signal']) & (df['MACD'].shift(1) >= df['Signal'].shift(1))).fillna(False)
 
-    else:
-        buy[:] = False
-        sell[:] = False
+    elif strategy_name == "布林通道突破策略":
+        period = int(params["期間"])
+        std_mult = float(params["標準差倍數"])
+        df['MA'] = df['Close'].rolling(window=period).mean()
+        df['STD'] = df['Close'].rolling(window=period).std()
+        df['Upper'] = df['MA'] + std_mult * df['STD']
+        df['Lower'] = df['MA'] - std_mult * df['STD']
+        buy = df['Close'] < df['Lower']
+        sell = df['Close'] > df['Upper']
+
+    elif strategy_name == "黃金交叉 EMA 策略":
+        short = int(params["短期 EMA"])
+        long = int(params["長期 EMA"])
+        df['EMA_short'] = df['Close'].ewm(span=short, adjust=False).mean()
+        df['EMA_long'] = df['Close'].ewm(span=long, adjust=False).mean()
+        buy = (df['EMA_short'] > df['EMA_long']) & (df['EMA_short'].shift(1) <= df['EMA_long'].shift(1))
+        sell = (df['EMA_short'] < df['EMA_long']) & (df['EMA_short'].shift(1) >= df['EMA_long'].shift(1))
+
+    elif strategy_name == "唐奇安通道策略":
+        period = int(params["期間"])
+        df['Donchian_High'] = df['High'].rolling(window=period).max()
+        df['Donchian_Low'] = df['Low'].rolling(window=period).min()
+        buy = df['Close'] > df['Donchian_High'].shift(1)
+        sell = df['Close'] < df['Donchian_Low'].shift(1)
 
     df['Position'] = 0
     df.loc[buy, 'Position'] = 1

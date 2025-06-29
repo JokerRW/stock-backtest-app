@@ -1,20 +1,49 @@
 # pages/3_策略比較.py
 import streamlit as st
 import pandas as pd
+import json
+import os
+import yfinance as yf
 from strategy import apply_strategy, strategies, stock_list
 from database import load_stock_prices, save_stock_prices
-import yfinance as yf
 
 st.title("📊 多股票多策略回測比較")
 
-# 多選股票
-stock_options = [f"{name} ({code})" for code, name in stock_list.items()]
-stocks_selected = st.multiselect("選擇股票（多選）", stock_options, default=stock_options[:2])
-stock_codes = [s.split("(")[-1].strip(")") for s in stocks_selected]
+# === 使用者選擇儲存與載入 ===
+SELECTION_FILE = "user_selection.json"
 
-# 多選策略
+def load_user_selection():
+    if os.path.exists(SELECTION_FILE):
+        try:
+            with open(SELECTION_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_user_selection(stocks, strategies):
+    data = {
+        "stocks": stocks,
+        "strategies": strategies
+    }
+    with open(SELECTION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# 股票與策略選項
+stock_options = [f"{name} ({code})" for code, name in stock_list.items()]
 strategy_names = list(strategies.keys())
-strategies_selected = st.multiselect("選擇策略（多選）", strategy_names, default=strategy_names[:2])
+
+# 載入上次選擇
+user_selection = load_user_selection()
+default_stocks = user_selection.get("stocks", stock_options[:2])
+default_strategies = user_selection.get("strategies", strategy_names[:2])
+
+# 多選
+stocks_selected = st.multiselect("選擇股票（多選）", stock_options, default=default_stocks)
+strategies_selected = st.multiselect("選擇策略（多選）", strategy_names, default=default_strategies)
+
+# 股票代碼清單
+stock_codes = [s.split("(")[-1].strip(")") for s in stocks_selected]
 
 # 選擇日期區間
 start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
@@ -49,9 +78,11 @@ if st.button("執行回測比較"):
         st.error("結束日期必須晚於開始日期")
         st.stop()
 
+    # 儲存目前選擇
+    save_user_selection(stocks_selected, strategies_selected)
+
     results = []
     for stock_code in stock_codes:
-        # 讀資料庫資料
         df = load_stock_prices(stock_code, start_date, end_date)
         if df.empty:
             st.info(f"資料庫無{stock_code}資料，從網路下載中...")
@@ -71,7 +102,6 @@ if st.button("執行回測比較"):
 
         for strat in strategies_selected:
             params = strategies[strat]["parameters"]
-            # 因是比較功能，直接用預設參數，不用再輸入細節（可擴充）
             try:
                 df_strategy = apply_strategy(df.copy(), strat, params)
             except Exception as e:
@@ -85,8 +115,7 @@ if st.button("執行回測比較"):
                 st.warning(f"{stock_code} {strat} 策略結果為空，跳過")
                 continue
 
-            # 計算指標
-            cum_return = df_strategy['Strategy'].sum()  # 累積報酬率
+            cum_return = df_strategy['Strategy'].sum()
             sharpe_ratio = (df_strategy['Strategy'].mean() / df_strategy['Strategy'].std()) * (252 ** 0.5) if df_strategy['Strategy'].std() != 0 else 0
             mdd = max_drawdown(df_strategy['Strategy'])
 
@@ -108,10 +137,8 @@ if st.button("執行回測比較"):
         st.dataframe(df_results.style.format({
             '累積報酬率(%)': '{:.2f}%',
             '夏普比率': '{:.2f}',
-            '最大回撤(%)': '{:.2f}%',
-        }))
+            '最大回撤(%)': '{:.2f}%'}))
 
-        # 繪製簡單柱狀圖比較累積報酬率
         import plotly.express as px
         fig = px.bar(df_results, x='股票', y='累積報酬率(%)', color='策略',
                      barmode='group', title='累積報酬率比較')

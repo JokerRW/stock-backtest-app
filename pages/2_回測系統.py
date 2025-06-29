@@ -4,12 +4,26 @@ import plotly.graph_objs as go
 from strategy import apply_strategy, strategies, stock_list
 from database import load_stock_prices, save_stock_prices
 import yfinance as yf
+import os
+import json
 
 st.title("📈 台股策略回測系統")
 
+# 儲存使用者選擇的檔案
+USER_PREF_FILE = "user_backtest_pref.json"
+
 # 股票選擇
 stock_options = [f"{name} ({code})" for code, name in stock_list.items()]
-stock_select = st.selectbox("選擇股票", stock_options)
+if os.path.exists(USER_PREF_FILE):
+    with open(USER_PREF_FILE, "r", encoding="utf-8") as f:
+        user_pref = json.load(f)
+    default_stock = user_pref.get("stock", stock_options[0])
+    default_strategy = user_pref.get("strategy", list(strategies.keys())[0])
+else:
+    default_stock = stock_options[0]
+    default_strategy = list(strategies.keys())[0]
+
+stock_select = st.selectbox("選擇股票", stock_options, index=stock_options.index(default_stock) if default_stock in stock_options else 0)
 stock_code = stock_select.split("(")[-1].strip(")")
 
 # 日期選擇
@@ -17,7 +31,7 @@ start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
 end_date = st.date_input("結束日期", pd.to_datetime("today"))
 
 # 策略選擇與參數
-strategy_name = st.selectbox("選擇策略", list(strategies.keys()))
+strategy_name = st.selectbox("選擇策略", list(strategies.keys()), index=list(strategies.keys()).index(default_strategy) if default_strategy in strategies else 0)
 st.info(strategies[strategy_name]["description"])
 params = {}
 for param, default in strategies[strategy_name]["parameters"].items():
@@ -68,6 +82,9 @@ def plot_strategy_performance(df):
 
 # 點擊回測按鈕
 if st.button("開始回測"):
+    with open(USER_PREF_FILE, "w", encoding="utf-8") as f:
+        json.dump({"stock": stock_select, "strategy": strategy_name}, f, ensure_ascii=False)
+
     with st.spinner("資料讀取中..."):
         df = load_stock_prices(stock_code, start_date, end_date)
         if not df.empty:
