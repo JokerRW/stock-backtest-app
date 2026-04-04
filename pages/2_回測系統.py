@@ -27,7 +27,7 @@ stock_select = st.selectbox("選擇股票", stock_options, index=stock_options.i
 stock_code = stock_select.split("(")[-1].strip(")")
 
 # 日期選擇
-start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
+start_date = st.date_input("開始日期", pd.to_datetime("2024-01-01"))
 end_date = st.date_input("結束日期", pd.to_datetime("today"))
 
 # 策略選擇與參數

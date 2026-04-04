@@ -44,7 +44,7 @@ strategies_selected = st.multiselect("選擇策略（多選）", strategy_names,
 stock_codes = [s.split("(")[-1].strip(")") for s in stocks_selected]
 
 # 選擇日期區間
-start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
+start_date = st.date_input("開始日期", pd.to_datetime("2024-01-01"))
 end_date = st.date_input("結束日期", pd.to_datetime("today"))
 
 # ✅ auto_adjust=False 保留原始市價；處理 MultiIndex 欄位
