@@ -6,3 +6,4 @@ plotly
 matplotlib
 scikit-learn
 ta
+SQLAlchemy
