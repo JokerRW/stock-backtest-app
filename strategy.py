@@ -59,26 +59,49 @@ strategies = {
         }
     },
     "布林通道策略": {
-        "description": "當收盤價上穿布林通道上軌時買入，下穿下軌時賣出。",
+        "description": "收盤價跌破布林通道下軌時買入，突破上軌時賣出。",
         "parameters": {
             "期間": 20,
             "標準差倍數": 2.0
         }
     },
-        "黃金交叉 EMA 策略": {
+    "黃金交叉 EMA 策略": {
         "description": "短期 EMA 上穿長期 EMA 為黃金交叉（買入），反之為死亡交叉（賣出）。",
         "parameters": {
             "短期 EMA": 12,
             "長期 EMA": 26
         }
     },
-        "唐奇安通道策略": {
+    "唐奇安通道策略": {
         "description": "收盤價突破過去 N 日最高價買入，跌破最低價賣出。",
         "parameters": {
             "期間": 20
         }
     },
 }
+
+
+def _build_position(buy: pd.Series, sell: pd.Series) -> pd.Series:
+    """
+    核心持倉邏輯：
+      - buy 訊號出現 → 進場（position = 1），持有直到 sell 訊號
+      - sell 訊號出現 → 出場（position = 0）
+      - 兩者同時出現 → 以 sell 優先（保守原則）
+      - 初始狀態 = 空手（0）
+
+    這樣可以避免 ffill 把「無訊號日」誤填成持倉，
+    造成策略累積報酬在末端暴衝或暴跌的問題。
+    """
+    position = pd.Series(0, index=buy.index, dtype=int)
+    current = 0
+    for i in range(len(buy)):
+        if sell.iloc[i]:
+            current = 0
+        elif buy.iloc[i]:
+            current = 1
+        position.iloc[i] = current
+    return position
+
 
 def apply_strategy(df, strategy_name, params):
     df = df.copy()
@@ -97,13 +120,14 @@ def apply_strategy(df, strategy_name, params):
         days = int(params["觀察天數"])
         threshold = float(params["跌幅閾值（％）"]) / 100
         df['Return'] = df['Close'].pct_change(periods=days)
-        buy = df['Return'] <= -threshold
-        sell = ~buy
+        buy = (df['Return'] <= -threshold).fillna(False)
+        # 反轉策略：跌幅不足時視為出場
+        sell = (df['Return'] > -threshold).fillna(False)
 
     elif strategy_name == "突破策略":
         period = int(params["突破天數"])
         if len(df) < period + 5:
-            raise ValueError(f"\U0001F4C9 資料天數過短（目前 {len(df)} 天），「突破策略」至少需要 {period + 5} 天。")
+            raise ValueError(f"📉 資料天數過短（目前 {len(df)} 天），「突破策略」至少需要 {period + 5} 天。")
         df['High_N'] = df['Close'].rolling(window=period, min_periods=period).max()
         df['Low_N'] = df['Close'].rolling(window=period, min_periods=period).min()
         buy = (df['Close'] > df['High_N'].shift(1)).fillna(False)
@@ -120,8 +144,9 @@ def apply_strategy(df, strategy_name, params):
         avg_loss = loss.rolling(rsi_period).mean()
         rs = avg_gain / avg_loss
         df['RSI'] = 100 - (100 / (1 + rs))
-        buy = (df['RSI'] < buy_level).fillna(False)
-        sell = (df['RSI'] > sell_level).fillna(False)
+        # RSI 從超賣區回升（穿越買入閾值）才買，避免一直持倉
+        buy = ((df['RSI'] > buy_level) & (df['RSI'].shift(1) <= buy_level)).fillna(False)
+        sell = ((df['RSI'] > sell_level)).fillna(False)
 
     elif strategy_name == "MACD 策略":
         short_ema = int(params["短期 EMA"])
@@ -134,15 +159,15 @@ def apply_strategy(df, strategy_name, params):
         buy = ((df['MACD'] > df['Signal']) & (df['MACD'].shift(1) <= df['Signal'].shift(1))).fillna(False)
         sell = ((df['MACD'] < df['Signal']) & (df['MACD'].shift(1) >= df['Signal'].shift(1))).fillna(False)
 
-    elif strategy_name == "布林通道突破策略":
+    elif strategy_name == "布林通道策略":
         period = int(params["期間"])
         std_mult = float(params["標準差倍數"])
         df['MA'] = df['Close'].rolling(window=period).mean()
         df['STD'] = df['Close'].rolling(window=period).std()
         df['Upper'] = df['MA'] + std_mult * df['STD']
         df['Lower'] = df['MA'] - std_mult * df['STD']
-        buy = df['Close'] < df['Lower']
-        sell = df['Close'] > df['Upper']
+        buy = (df['Close'] < df['Lower']).fillna(False)
+        sell = (df['Close'] > df['Upper']).fillna(False)
 
     elif strategy_name == "黃金交叉 EMA 策略":
         short = int(params["短期 EMA"])
@@ -156,13 +181,11 @@ def apply_strategy(df, strategy_name, params):
         period = int(params["期間"])
         df['Donchian_High'] = df['High'].rolling(window=period).max()
         df['Donchian_Low'] = df['Low'].rolling(window=period).min()
-        buy = df['Close'] > df['Donchian_High'].shift(1)
-        sell = df['Close'] < df['Donchian_Low'].shift(1)
+        buy = (df['Close'] > df['Donchian_High'].shift(1)).fillna(False)
+        sell = (df['Close'] < df['Donchian_Low'].shift(1)).fillna(False)
 
-    df['Position'] = 0
-    df.loc[buy, 'Position'] = 1
-    df.loc[sell, 'Position'] = -1
-    df['Position'] = df['Position'].replace(0, pd.NA).ffill().fillna(0).astype(int)
+    # ✅ 修正：用狀態機邏輯建立持倉，買入後持有直到賣出訊號
+    df['Position'] = _build_position(buy, sell)
 
     return df
 

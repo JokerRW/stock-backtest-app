@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objs as go
 from strategy import apply_strategy, strategies, stock_list
-from database import load_stock_prices, save_stock_prices
+from database import load_stock_prices, save_stock_prices, delete_stock_prices
 import yfinance as yf
 import os
 import json
@@ -36,7 +36,7 @@ st.info(strategies[strategy_name]["description"])
 params = {}
 for param, default in strategies[strategy_name]["parameters"].items():
     if isinstance(default, int):
-        params[param] = st.number_input(param, value=default, step=1)
+        params[param] = st.slider(param, min_value=1, max_value=200, value=default, step=1)
     elif isinstance(default, float):
         params[param] = st.number_input(param, value=default, format="%.2f")
     else:
@@ -48,11 +48,13 @@ if (end_date - start_date).days < min_days_required:
     st.warning(f"⚠️ 資料區間太短（{(end_date - start_date).days} 天），此策略至少需要 {min_days_required} 天")
     st.stop()
 
-# 從網路抓資料
+# ✅ auto_adjust=False 保留原始市價，避免還原權值後股價失真
 def fetch_stock_data_from_web(stock_code, start_date, end_date):
-    df = yf.download(stock_code, start=start_date, end=end_date)
+    df = yf.download(stock_code, start=start_date, end=end_date, auto_adjust=False)
     if df.empty:
         return df
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] for col in df.columns]
     df.reset_index(inplace=True)
     df['Date'] = pd.to_datetime(df['Date'])
     df.set_index('Date', inplace=True)
@@ -75,10 +77,22 @@ def plot_candlestick(df):
 # 畫策略績效圖
 def plot_strategy_performance(df):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['DailyReturn'].cumsum(), mode='lines', name='買入持有報酬率'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['Strategy'].cumsum(), mode='lines', name='策略報酬率'))
+    fig.add_trace(go.Scatter(x=df.index, y=df['BuyHoldCumulative'], mode='lines', name='買入持有報酬率'))
+    fig.add_trace(go.Scatter(x=df.index, y=df['StrategyCumulative'], mode='lines', name='策略報酬率'))
     fig.update_layout(title="策略 vs 買入持有累積報酬率", xaxis_title="日期", yaxis_title="累積報酬率")
     return fig
+
+# 清理資料：排序、轉型、移除 NaN
+def clean_price_data(df):
+    df = df.sort_index()
+    df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+    df = df[df['Close'].notna()].copy()
+    return df
+
+# ✅ 清除快取按鈕
+if st.button("🗑️ 清除此股票快取並重新下載"):
+    delete_stock_prices(stock_code)
+    st.success(f"✅ 已清除 {stock_code} 的快取資料，下次回測將重新從網路下載")
 
 # 點擊回測按鈕
 if st.button("開始回測"):
@@ -97,9 +111,7 @@ if st.button("開始回測"):
                 st.error("❌ 從網路無法取得股票資料，請稍後再試或換其他條件")
                 st.stop()
             save_stock_prices(df_web, stock_code)
-            df = load_stock_prices(stock_code, start_date, end_date)
-            if not df.empty:
-                df.index = pd.to_datetime(df.index)
+            df = df_web
 
         if df.empty:
             st.warning("⚠️ 沒有取得股票資料，請調整日期區間或股票代碼")
@@ -107,6 +119,12 @@ if st.button("開始回測"):
 
     if 'Close' not in df.columns:
         st.error("資料中沒有 Close 欄位，無法回測")
+        st.stop()
+
+    # 清理價格資料
+    df = clean_price_data(df)
+    if df.empty:
+        st.error("❌ 清理後資料為空，請檢查資料來源")
         st.stop()
 
     try:
@@ -117,28 +135,45 @@ if st.button("開始回測"):
         st.error(f"策略執行失敗：{e}")
         st.stop()
 
+    # 計算報酬率
     df['DailyReturn'] = df['Close'].pct_change()
     df['Strategy'] = df['Position'].shift(1) * df['DailyReturn']
-    df.dropna(subset=['DailyReturn', 'Strategy', 'Position'], inplace=True)
+    df = df.dropna(subset=['DailyReturn', 'Strategy'])
+
+    # 過濾異常報酬率
+    abnormal = df['DailyReturn'].abs() >= 0.5
+    if abnormal.any():
+        st.warning(f"⚠️ 偵測到 {abnormal.sum()} 筆異常報酬率（單日 ±50% 以上），已自動排除")
+        df = df[~abnormal]
 
     if df.empty:
         st.error("❌ 回測結果為空，請檢查策略參數或資料")
         st.stop()
 
+    # 幾何累積報酬率
+    df['BuyHoldCumulative'] = (1 + df['DailyReturn']).cumprod() - 1
+    df['StrategyCumulative'] = (1 + df['Strategy']).cumprod() - 1
+
     # 畫圖
     st.plotly_chart(plot_candlestick(df), use_container_width=True)
     st.plotly_chart(plot_strategy_performance(df), use_container_width=True)
 
-    # 顯示夏普比率
-    sharpe_ratio = (df['Strategy'].mean() / df['Strategy'].std()) * (252 ** 0.5) if df['Strategy'].std() != 0 else 0
+    # 夏普比率（台股一年 240 天）
+    TRADING_DAYS = 240
+    sharpe_ratio = (df['Strategy'].mean() / df['Strategy'].std()) * (TRADING_DAYS ** 0.5) if df['Strategy'].std() != 0 else 0
     st.markdown(f"### 📊 策略夏普比率（Sharpe Ratio）：{sharpe_ratio:.2f}")
+
+    # 最大回撤（基於策略淨值）
+    cum_return = (1 + df['Strategy']).cumprod()
+    running_max = cum_return.cummax()
+    drawdown = (cum_return - running_max) / running_max
+    strategy_drawdown = drawdown.min()
 
     # 顯示績效總表
     period_str = f"{df.index.min().date()} ~ {df.index.max().date()}"
-    buy_hold_return = df['DailyReturn'].cumsum().iloc[-1]
-    strategy_return = df['Strategy'].cumsum().iloc[-1]
-    strategy_risk = df['Strategy'].std() * (252 ** 0.5)
-    strategy_drawdown = (df['Strategy'].cumsum().cummax() - df['Strategy'].cumsum()).max()
+    buy_hold_return = df['BuyHoldCumulative'].iloc[-1]
+    strategy_return = df['StrategyCumulative'].iloc[-1]
+    strategy_risk = df['Strategy'].std() * (TRADING_DAYS ** 0.5)
 
     summary_df = pd.DataFrame({
         "項目": ["期間", "買入持有報酬率", "策略報酬率", "策略風險（年化波動）", "最大回撤"],
@@ -147,7 +182,7 @@ if st.button("開始回測"):
             f"{buy_hold_return:.2%}",
             f"{strategy_return:.2%}",
             f"{strategy_risk:.2%}",
-            f"{-strategy_drawdown:.2%}"
+            f"{strategy_drawdown:.2%}"
         ]
     })
 
@@ -157,9 +192,10 @@ if st.button("開始回測"):
     # 顯示最新交易訊號
     if not df.empty:
         last_pos = df['Position'].iloc[-1]
-        signal_text = "持有"
+        last_date = df.index[-1].date()
+        signal_text = "空手"
         if last_pos == 1:
-            signal_text = "買入"
+            signal_text = "持有（買入）"
         elif last_pos == -1:
-            signal_text = "賣出"
-        st.markdown(f"### 🔔 最新交易訊號：**{signal_text}**")
+            signal_text = "放空"
+        st.markdown(f"### 🔔 最新交易訊號：**{signal_text}** （日期：{last_date}）")

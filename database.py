@@ -24,7 +24,7 @@ def init_db():
         )
         """))
         conn.commit()
-        
+
 # 儲存股票歷史價格
 def save_stock_prices(df: pd.DataFrame, stock_code: str):
     df = df.copy()
@@ -77,6 +77,13 @@ def load_stock_prices(stock_code: str, start_date=None, end_date=None):
         df = pd.read_sql(text(query), conn, params=params, parse_dates=["Date"])
     df.set_index("Date", inplace=True)
     return df
+
+# ✅ 新增：刪除指定股票的所有快取資料
+def delete_stock_prices(stock_code: str):
+    with engine.begin() as conn:
+        conn.execute(text("""
+            DELETE FROM stock_price WHERE stock_code = :code
+        """), {"code": stock_code})
 
 # 檢查股票的最新日期
 def get_latest_date(stock_code: str):

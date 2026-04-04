@@ -13,7 +13,7 @@ init_db()
 TWII_SYMBOL = "^TWII"
 TWII_NAME = "台灣加權指數"
 
-st.set_page_config(page_title="台股大盤即時資訊", layout="wide")
+st.set_page_config(page_title="台股大盤即時資訊", layout="wide", initial_sidebar_state="expanded")
 st.title(f"📊 {TWII_NAME} 即時顯示與資料儲存")
 
 @st.cache_data(ttl=3600)
