@@ -49,6 +49,11 @@ with st.sidebar:
     else:
         st.info("未輸入 Key，將跳過 AI 分析")
 
+    st.markdown("---")
+    if st.button("🗑️ 清除所有快取", help="若 AI 回應異常或模型沒更新，請點此清除"):
+        st.cache_data.clear()
+        st.success("✅ 快取已清除，請重新執行回測")
+
 # =====================
 # 股票與策略選項
 # =====================
@@ -126,11 +131,19 @@ def build_prompt(df_results: pd.DataFrame, start_date, end_date) -> str:
 """.strip()
     return prompt
 
-def call_gemini(api_key: str, prompt: str) -> str:
-    """呼叫 Gemini 2.5 Flash API"""
+def call_gemini_stream(api_key: str, prompt: str, max_retries: int = 3) -> str:
+    """
+    呼叫 Gemini 2.5 Flash Streaming API。
+    2.5-flash 有強制思考機制，思考 token 會佔用輸出空間導致截斷。
+    改用 streamGenerateContent（SSE），思考與輸出分開串流，
+    只收集 role=model 的 text parts，完整拼接後回傳。
+    """
+    import time
+    import json as _json
+
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-2.5-flash:generateContent"
+        "gemini-2.5-flash:streamGenerateContent?alt=sse"
     )
     headers = {
         "Content-Type": "application/json",
@@ -140,43 +153,62 @@ def call_gemini(api_key: str, prompt: str) -> str:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.4,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 4096,
         }
     }
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
 
-        # 除錯：顯示完整回應結構
-        with st.expander("🔍 Gemini 原始回應（除錯用）", expanded=False):
-            st.json(data)
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                url, json=payload, headers=headers,
+                timeout=60, stream=True
+            )
 
-        # 嘗試多種可能的回應結構
-        candidates = data.get("candidates", [])
-        if not candidates:
-            return "❌ Gemini 未回傳任何候選內容，請稍後再試。"
+            if resp.status_code == 429:
+                wait_sec = 15 * (attempt + 1)
+                st.warning(f"⏳ API 請求頻率超限，{wait_sec} 秒後自動重試（第 {attempt + 1}/{max_retries} 次）...")
+                time.sleep(wait_sec)
+                continue
 
-        candidate = candidates[0]
+            resp.raise_for_status()
 
-        # 檢查 finishReason
-        finish_reason = candidate.get("finishReason", "")
-        if finish_reason not in ("STOP", "MAX_TOKENS", ""):
-            return f"❌ Gemini 回應異常（finishReason: {finish_reason}），請稍後再試。"
+            # SSE 串流：逐行解析 data: {...} 事件
+            full_text = ""
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                if not line.startswith("data:"):
+                    continue
+                json_str = line[len("data:"):].strip()
+                if json_str == "[DONE]":
+                    break
+                try:
+                    chunk = _json.loads(json_str)
+                except _json.JSONDecodeError:
+                    continue
 
-        # 取出文字內容
-        content = candidate.get("content", {})
-        parts = content.get("parts", [])
-        if not parts:
-            return "❌ Gemini 回應內容為空。"
+                # 只取 model 角色的 text，跳過思考用的 thought parts
+                candidates = chunk.get("candidates", [])
+                for candidate in candidates:
+                    parts = candidate.get("content", {}).get("parts", [])
+                    for part in parts:
+                        # thought=True 的是思考內容，跳過
+                        if part.get("thought", False):
+                            continue
+                        if "text" in part:
+                            full_text += part["text"]
 
-        full_text = "\n".join(p.get("text", "") for p in parts if "text" in p)
-        return full_text if full_text.strip() else "❌ Gemini 回傳的文字內容為空。"
+            if full_text.strip():
+                return full_text
+            return "❌ Gemini 回傳的文字內容為空。"
 
-    except requests.exceptions.HTTPError:
-        return f"❌ API 呼叫失敗（HTTP {resp.status_code}）：請確認 API Key 是否正確或額度是否足夠。"
-    except Exception as e:
-        return f"❌ 發生錯誤：{e}"
+        except requests.exceptions.HTTPError:
+            return f"❌ API 呼叫失敗（HTTP {resp.status_code}）：Key 錯誤或帳號額度已用盡。"
+        except Exception as e:
+            return f"❌ 發生錯誤：{e}"
+
+    return "❌ 已重試 3 次仍失敗，請稍後再試或確認免費額度是否已用盡。"
 
 # =====================
 # 回測主流程
@@ -277,7 +309,6 @@ if st.button("🚀 執行回測比較"):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 夏普比率比較圖
     fig_sharpe = px.bar(
         df_results, x='股票', y='夏普比率', color='策略',
         barmode='group', title='各股票 × 各策略 夏普比率比較',
@@ -293,9 +324,9 @@ if st.button("🚀 執行回測比較"):
         st.markdown("## 🤖 AI 策略分析摘要")
         st.caption("由 Google Gemini 2.5 Flash 根據回測結果自動生成，僅供參考。")
 
-        with st.spinner("AI 分析中，請稍候..."):
+        with st.spinner("AI 分析中，請稍候（最多等待約 45 秒）..."):
             prompt = build_prompt(df_results, start_date, end_date)
-            ai_response = call_gemini(gemini_api_key, prompt)
+            ai_response = call_gemini_stream(gemini_api_key, prompt)
 
         st.markdown(ai_response)
     else:
