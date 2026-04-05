@@ -12,8 +12,34 @@ import json
 
 st.title("📈 台股策略回測系統")
 
-TRADING_DAYS = 240
-USER_PREF_FILE = "user_backtest_pref.json"
+TRADING_DAYS    = 240
+USER_PREF_FILE  = "user_backtest_pref.json"
+BEST_PARAM_FILE = "user_best_params.json"   # ✅ 最佳參數儲存檔
+
+# =====================
+# 最佳參數讀寫工具
+# =====================
+def load_best_params():
+    if os.path.exists(BEST_PARAM_FILE):
+        try:
+            with open(BEST_PARAM_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_best_params(stock_code, strategy_name, params, metrics):
+    data = load_best_params()
+    key  = f"{stock_code}_{strategy_name}"
+    data[key] = {
+        "stock_code":    stock_code,
+        "strategy_name": strategy_name,
+        "params":        params,
+        "metrics":       metrics,
+        "saved_at":      pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    with open(BEST_PARAM_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # =====================
 # 使用者偏好
@@ -28,9 +54,9 @@ else:
     default_stock    = stock_options[0]
     default_strategy = list(strategies.keys())[0]
 
-stock_select  = st.selectbox("選擇股票", stock_options,
+stock_select = st.selectbox("選擇股票", stock_options,
     index=stock_options.index(default_stock) if default_stock in stock_options else 0)
-stock_code    = stock_select.split("(")[-1].strip(")")
+stock_code   = stock_select.split("(")[-1].strip(")")
 
 col_d1, col_d2 = st.columns(2)
 with col_d1:
@@ -42,19 +68,64 @@ strategy_name = st.selectbox("選擇策略", list(strategies.keys()),
     index=list(strategies.keys()).index(default_strategy) if default_strategy in strategies else 0)
 st.info(strategies[strategy_name]["description"])
 
-# 手動參數（回測用）
+# ✅ 最佳參數套用（用 session_state 管理，避免 checkbox 與 slider 渲染順序問題）
+best_params_db = load_best_params()
+best_key       = f"{stock_code}_{strategy_name}"
+
+# session_state key：每個股票 × 策略組合獨立
+ss_key = f"use_best_{best_key}"
+if ss_key not in st.session_state:
+    st.session_state[ss_key] = False
+
+if best_key in best_params_db:
+    saved = best_params_db[best_key]
+    st.info(
+        f"💾 此股票 × 策略已有儲存的最佳參數（{saved['saved_at']}）：" +
+        "、".join([f"{k}={v}" for k, v in saved["params"].items()])
+    )
+    col_cb, col_btn = st.columns([3, 1])
+    with col_cb:
+        use_saved = st.checkbox(
+            "✅ 套用已儲存的最佳參數",
+            value=st.session_state[ss_key],
+            key=f"cb_{ss_key}"
+        )
+    with col_btn:
+        if st.button("🔄 套用並重新整理", key=f"apply_{ss_key}"):
+            st.session_state[ss_key] = True
+            st.rerun()
+    # 同步 checkbox 狀態
+    if use_saved != st.session_state[ss_key]:
+        st.session_state[ss_key] = use_saved
+        st.rerun()
+else:
+    use_saved = False
+
+# 參數 widget：套用最佳時直接顯示數值（唯讀提示），否則顯示可調整的 slider
 params = {}
+saved_p = best_params_db.get(best_key, {}).get("params", {}) if use_saved else {}
 for param, default in strategies[strategy_name]["parameters"].items():
+    val = saved_p.get(param, default)
     if isinstance(default, int):
-        params[param] = st.slider(param, min_value=1, max_value=200, value=default, step=1)
+        if use_saved:
+            # 套用最佳參數時：顯示固定值（不可調整，避免誤改）
+            st.markdown(f"**{param}**：`{int(val)}`（最佳化參數）")
+            params[param] = int(val)
+        else:
+            params[param] = st.slider(param, min_value=1, max_value=200,
+                                      value=int(val), step=1)
     elif isinstance(default, float):
-        params[param] = st.number_input(param, value=default, format="%.2f")
+        if use_saved:
+            st.markdown(f"**{param}**：`{float(val)}`（最佳化參數）")
+            params[param] = float(val)
+        else:
+            params[param] = st.number_input(param, value=float(val), format="%.2f")
     else:
-        params[param] = st.text_input(param, value=str(default))
+        params[param] = st.text_input(param, value=str(val))
 
 min_days_required = int(params.get("突破天數", 20)) + 5
 if (end_date - start_date).days < min_days_required:
-    st.warning(f"⚠️ 資料區間太短（{(end_date - start_date).days} 天），此策略至少需要 {min_days_required} 天")
+    st.warning(f"⚠️ 資料區間太短（{(end_date - start_date).days} 天），至少需要 {min_days_required} 天")
     st.stop()
 
 # =====================
@@ -76,125 +147,6 @@ def clean_price_data(df):
     df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
     return df[df['Close'].notna()].copy()
 
-def run_backtest(df, strategy_name, params):
-    """執行單次回測，回傳績效指標 dict；失敗回傳 None"""
-    try:
-        df_s = apply_strategy(df.copy(), strategy_name, params)
-    except Exception:
-        return None
-    df_s['DailyReturn'] = df_s['Close'].pct_change()
-    df_s['Strategy']    = df_s['Position'].shift(1) * df_s['DailyReturn']
-    df_s = df_s.dropna(subset=['DailyReturn', 'Strategy'])
-    df_s = df_s[df_s['DailyReturn'].abs() < 0.5]
-    if df_s.empty:
-        return None
-
-    cum_s  = (1 + df_s['Strategy']).cumprod()
-    cum_r  = cum_s.iloc[-1] - 1
-    mdd    = ((cum_s - cum_s.cummax()) / cum_s.cummax()).min()
-    sharpe = (df_s['Strategy'].mean() / df_s['Strategy'].std() * TRADING_DAYS ** 0.5
-              if df_s['Strategy'].std() != 0 else 0)
-    trades = int((df_s['Position'].diff().abs() > 0).sum())
-    return {
-        "累積報酬率(%)": round(cum_r * 100, 2),
-        "夏普比率":       round(sharpe, 2),
-        "最大回撤(%)":    round(mdd * 100, 2),
-        "交易次數":       trades,
-    }
-
-def plot_candlestick(df):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['Open'], high=df['High'],
-        low=df['Low'], close=df['Close'], name='價格'
-    ))
-    fig.update_layout(title="股票價格（蠟燭圖）", xaxis_title="日期", yaxis_title="價格")
-    return fig
-
-def plot_strategy_performance(df):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['BuyHoldCumulative'],
-                             mode='lines', name='買入持有報酬率'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['StrategyCumulative'],
-                             mode='lines', name='策略報酬率'))
-    fig.update_layout(title="策略 vs 買入持有累積報酬率",
-                      xaxis_title="日期", yaxis_title="累積報酬率")
-    return fig
-
-# =====================
-# 參數最佳化設定
-# =====================
-st.markdown("---")
-st.markdown("## 🔍 參數最佳化（Grid Search）")
-st.caption("自動枚舉所有參數組合，找出最佳參數區間。參數範圍越大，耗時越長。")
-
-# 僅針對 int/float 參數開放最佳化設定
-opt_ranges = {}
-has_optimizable = False
-opt_cols = st.columns(2)
-col_idx  = 0
-
-for param, default in strategies[strategy_name]["parameters"].items():
-    if isinstance(default, int):
-        has_optimizable = True
-        with opt_cols[col_idx % 2]:
-            st.markdown(f"**{param}**")
-            c1, c2, c3 = st.columns(3)
-            p_min  = c1.number_input(f"最小值", min_value=1,   max_value=500, value=max(1, default - 10),  step=1,  key=f"opt_min_{param}")
-            p_max  = c2.number_input(f"最大值", min_value=1,   max_value=500, value=default + 10,          step=1,  key=f"opt_max_{param}")
-            p_step = c3.number_input(f"步長",   min_value=1,   max_value=50,  value=5,                     step=1,  key=f"opt_step_{param}")
-        opt_ranges[param] = ("int", p_min, p_max, p_step)
-        col_idx += 1
-
-    elif isinstance(default, float):
-        has_optimizable = True
-        with opt_cols[col_idx % 2]:
-            st.markdown(f"**{param}**")
-            c1, c2, c3 = st.columns(3)
-            p_min  = c1.number_input(f"最小值", value=round(default * 0.5, 2), step=0.1, format="%.2f", key=f"opt_min_{param}")
-            p_max  = c2.number_input(f"最大值", value=round(default * 1.5, 2), step=0.1, format="%.2f", key=f"opt_max_{param}")
-            p_step = c3.number_input(f"步長",   value=0.5,                     step=0.1, format="%.2f", key=f"opt_step_{param}")
-        opt_ranges[param] = ("float", p_min, p_max, p_step)
-        col_idx += 1
-
-# 最佳化目標
-opt_target = st.selectbox(
-    "最佳化目標",
-    ["夏普比率", "累積報酬率(%)", "最大回撤(%)（最小化）"],
-    help="依照哪個指標選出最佳參數組合"
-)
-
-if not has_optimizable:
-    st.info("此策略無數值型參數，無法進行最佳化。")
-
-# 預估組合數
-def estimate_combinations(opt_ranges):
-    total = 1
-    for param, (dtype, p_min, p_max, p_step) in opt_ranges.items():
-        if dtype == "int":
-            n = len(range(int(p_min), int(p_max) + 1, int(p_step)))
-        else:
-            n = len(np.arange(p_min, p_max + p_step * 0.5, p_step))
-        total *= max(n, 1)
-    return total
-
-if has_optimizable and opt_ranges:
-    est = estimate_combinations(opt_ranges)
-    color = "🟢" if est <= 100 else ("🟡" if est <= 500 else "🔴")
-    st.caption(f"{color} 預估參數組合數：**{est}** 組（建議 500 組以內，避免等待過久）")
-
-# =====================
-# 快取清除
-# =====================
-if st.button("🗑️ 清除此股票快取並重新下載"):
-    delete_stock_prices(stock_code)
-    st.success(f"✅ 已清除 {stock_code} 的快取資料")
-
-st.markdown("---")
-
-# =====================
-# 載入股價（共用）
-# =====================
 @st.cache_data(show_spinner=False)
 def load_price(stock_code, start_date, end_date):
     df = load_stock_prices(stock_code, start_date, end_date)
@@ -205,6 +157,180 @@ def load_price(stock_code, start_date, end_date):
         if not df.empty:
             save_stock_prices(df, stock_code)
     return df
+
+def run_backtest(df, strategy_name, params):
+    try:
+        df_s = apply_strategy(df.copy(), strategy_name, params)
+    except Exception:
+        return None
+    df_s['DailyReturn'] = df_s['Close'].pct_change()
+    df_s['Strategy']    = df_s['Position'].shift(1) * df_s['DailyReturn']
+    df_s = df_s.dropna(subset=['DailyReturn', 'Strategy'])
+    df_s = df_s[df_s['DailyReturn'].abs() < 0.5]
+    if df_s.empty:
+        return None
+    cum_s  = (1 + df_s['Strategy']).cumprod()
+    sharpe = (df_s['Strategy'].mean() / df_s['Strategy'].std() * TRADING_DAYS ** 0.5
+              if df_s['Strategy'].std() != 0 else 0)
+    return {
+        "累積報酬率(%)": round((cum_s.iloc[-1] - 1) * 100, 2),
+        "夏普比率":       round(sharpe, 2),
+        "最大回撤(%)":    round(((cum_s - cum_s.cummax()) / cum_s.cummax()).min() * 100, 2),
+        "交易次數":       int((df_s['Position'].diff().abs() > 0).sum()),
+    }
+
+# ✅ 歷史買賣紀錄計算
+def calc_trade_history(df_s):
+    """
+    從 Position 欄位的變化點抓出每筆進出場。
+    回傳 DataFrame：買入日期、買入價、賣出日期、賣出價、持有天數、損益率
+    """
+    trades  = []
+    pos     = df_s['Position'].values
+    closes  = df_s['Close'].values
+    dates   = df_s.index
+
+    entry_date  = None
+    entry_price = None
+
+    for i in range(1, len(pos)):
+        prev, curr = pos[i - 1], pos[i]
+
+        # 進場：從 0 → 1
+        if prev == 0 and curr == 1:
+            entry_date  = dates[i]
+            entry_price = closes[i]
+
+        # 出場：從 1 → 0
+        elif prev == 1 and curr == 0 and entry_date is not None:
+            exit_date  = dates[i]
+            exit_price = closes[i]
+            hold_days  = (exit_date - entry_date).days
+            pnl        = (exit_price - entry_price) / entry_price
+            trades.append({
+                "買入日期":  entry_date.date(),
+                "買入價格":  round(float(entry_price), 2),
+                "賣出日期":  exit_date.date(),
+                "賣出價格":  round(float(exit_price), 2),
+                "持有天數":  hold_days,
+                "損益率(%)": round(pnl * 100, 2),
+                "結果":      "✅ 獲利" if pnl > 0 else "❌ 虧損",
+            })
+            entry_date  = None
+            entry_price = None
+
+    # 尚未出場（仍持倉中）
+    if entry_date is not None:
+        last_price = closes[-1]
+        pnl        = (last_price - entry_price) / entry_price
+        trades.append({
+            "買入日期":  entry_date.date(),
+            "買入價格":  round(float(entry_price), 2),
+            "賣出日期":  "持倉中",
+            "賣出價格":  round(float(last_price), 2),
+            "持有天數":  (dates[-1] - entry_date).days,
+            "損益率(%)": round(pnl * 100, 2),
+            "結果":      "🔄 持倉中",
+        })
+
+    return pd.DataFrame(trades)
+
+def plot_candlestick_with_signals(df_s):
+    """蠟燭圖 + 買賣訊號標記"""
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df_s.index, open=df_s['Open'], high=df_s['High'],
+        low=df_s['Low'],  close=df_s['Close'], name='價格',
+        increasing_line_color='red', decreasing_line_color='green'
+    ))
+    # 買入點
+    buy_pts  = df_s[df_s['Position'].diff() == 1]
+    sell_pts = df_s[df_s['Position'].diff() == -1]
+    fig.add_trace(go.Scatter(
+        x=buy_pts.index, y=buy_pts['Close'], mode='markers', name='買入',
+        marker=dict(symbol='triangle-up', size=12, color='red')
+    ))
+    fig.add_trace(go.Scatter(
+        x=sell_pts.index, y=sell_pts['Close'], mode='markers', name='賣出',
+        marker=dict(symbol='triangle-down', size=12, color='green')
+    ))
+    fig.update_layout(title="股票價格 + 買賣訊號", xaxis_title="日期", yaxis_title="價格",
+                      xaxis_rangeslider_visible=False)
+    return fig
+
+def plot_strategy_performance(df_s):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_s.index, y=df_s['BuyHoldCumulative'],
+                             mode='lines', name='買入持有報酬率', line=dict(dash='dash', color='gray')))
+    fig.add_trace(go.Scatter(x=df_s.index, y=df_s['StrategyCumulative'],
+                             mode='lines', name='策略報酬率', line=dict(color='royalblue')))
+    fig.update_layout(title="策略 vs 買入持有累積報酬率",
+                      xaxis_title="日期", yaxis_title="累積報酬率")
+    return fig
+
+# =====================
+# 參數最佳化設定 UI
+# =====================
+st.markdown("---")
+st.markdown("## 🔍 參數最佳化（Grid Search）")
+st.caption("自動枚舉所有參數組合，找出最佳參數區間。參數範圍越大，耗時越長。")
+
+opt_ranges      = {}
+has_optimizable = False
+opt_cols        = st.columns(2)
+col_idx         = 0
+
+for param, default in strategies[strategy_name]["parameters"].items():
+    if isinstance(default, int):
+        has_optimizable = True
+        with opt_cols[col_idx % 2]:
+            st.markdown(f"**{param}**")
+            c1, c2, c3 = st.columns(3)
+            p_min  = c1.number_input("最小值", min_value=1, max_value=500, value=max(1, default - 10), step=1,  key=f"opt_min_{param}")
+            p_max  = c2.number_input("最大值", min_value=1, max_value=500, value=default + 10,         step=1,  key=f"opt_max_{param}")
+            p_step = c3.number_input("步長",   min_value=1, max_value=50,  value=5,                    step=1,  key=f"opt_step_{param}")
+        opt_ranges[param] = ("int", p_min, p_max, p_step)
+        col_idx += 1
+    elif isinstance(default, float):
+        has_optimizable = True
+        with opt_cols[col_idx % 2]:
+            st.markdown(f"**{param}**")
+            c1, c2, c3 = st.columns(3)
+            p_min  = c1.number_input("最小值", value=round(default * 0.5, 2), step=0.1, format="%.2f", key=f"opt_min_{param}")
+            p_max  = c2.number_input("最大值", value=round(default * 1.5, 2), step=0.1, format="%.2f", key=f"opt_max_{param}")
+            p_step = c3.number_input("步長",   value=0.5,                     step=0.1, format="%.2f", key=f"opt_step_{param}")
+        opt_ranges[param] = ("float", p_min, p_max, p_step)
+        col_idx += 1
+
+opt_target = st.selectbox("最佳化目標",
+    ["夏普比率", "累積報酬率(%)", "最大回撤(%)（最小化）"],
+    help="依照哪個指標選出最佳參數組合"
+)
+
+if not has_optimizable:
+    st.info("此策略無數值型參數，無法進行最佳化。")
+
+def estimate_combinations(opt_ranges):
+    total = 1
+    for _, (dtype, p_min, p_max, p_step) in opt_ranges.items():
+        n = len(range(int(p_min), int(p_max) + 1, int(p_step))) if dtype == "int" \
+            else len(np.arange(p_min, p_max + p_step * 0.5, p_step))
+        total *= max(n, 1)
+    return total
+
+if has_optimizable and opt_ranges:
+    est   = estimate_combinations(opt_ranges)
+    color = "🟢" if est <= 100 else ("🟡" if est <= 500 else "🔴")
+    st.caption(f"{color} 預估參數組合數：**{est}** 組")
+
+# =====================
+# 快取清除
+# =====================
+if st.button("🗑️ 清除此股票快取並重新下載"):
+    delete_stock_prices(stock_code)
+    st.success(f"✅ 已清除 {stock_code} 的快取資料")
+
+st.markdown("---")
 
 # =====================
 # 一般回測
@@ -217,67 +343,122 @@ if st.button("🚀 開始回測"):
         df = load_price(stock_code, start_date, end_date)
 
     if df.empty:
-        st.error("❌ 無法取得股票資料")
-        st.stop()
+        st.error("❌ 無法取得股票資料"); st.stop()
     if 'Close' not in df.columns:
-        st.error("資料中沒有 Close 欄位")
-        st.stop()
+        st.error("資料中沒有 Close 欄位"); st.stop()
 
     df = clean_price_data(df)
     if df.empty:
-        st.error("❌ 清理後資料為空")
-        st.stop()
+        st.error("❌ 清理後資料為空"); st.stop()
 
     try:
         df_s = apply_strategy(df, strategy_name, params)
-        st.write("策略後資料筆數：", len(df_s))
-        st.dataframe(df_s[['Close', 'Position']].tail(10))
     except Exception as e:
-        st.error(f"策略執行失敗：{e}")
-        st.stop()
+        st.error(f"策略執行失敗：{e}"); st.stop()
 
     df_s['DailyReturn'] = df_s['Close'].pct_change()
     df_s['Strategy']    = df_s['Position'].shift(1) * df_s['DailyReturn']
     df_s = df_s.dropna(subset=['DailyReturn', 'Strategy'])
-
     abnormal = df_s['DailyReturn'].abs() >= 0.5
     if abnormal.any():
         st.warning(f"⚠️ 偵測到 {abnormal.sum()} 筆異常報酬率，已自動排除")
         df_s = df_s[~abnormal]
-
     if df_s.empty:
-        st.error("❌ 回測結果為空")
-        st.stop()
+        st.error("❌ 回測結果為空"); st.stop()
 
-    df_s['BuyHoldCumulative'] = (1 + df_s['DailyReturn']).cumprod() - 1
+    df_s['BuyHoldCumulative']  = (1 + df_s['DailyReturn']).cumprod() - 1
     df_s['StrategyCumulative'] = (1 + df_s['Strategy']).cumprod() - 1
 
-    st.plotly_chart(plot_candlestick(df_s), use_container_width=True)
+    # ── 圖表 ──
+    st.plotly_chart(plot_candlestick_with_signals(df_s), use_container_width=True)
     st.plotly_chart(plot_strategy_performance(df_s), use_container_width=True)
 
-    sharpe_ratio    = (df_s['Strategy'].mean() / df_s['Strategy'].std()) * TRADING_DAYS ** 0.5 \
-                      if df_s['Strategy'].std() != 0 else 0
-    cum_ret         = (1 + df_s['Strategy']).cumprod()
+    # ── 績效總表 ──
+    sharpe_ratio      = (df_s['Strategy'].mean() / df_s['Strategy'].std()) * TRADING_DAYS ** 0.5 \
+                        if df_s['Strategy'].std() != 0 else 0
+    cum_ret           = (1 + df_s['Strategy']).cumprod()
     strategy_drawdown = ((cum_ret - cum_ret.cummax()) / cum_ret.cummax()).min()
+    strategy_risk     = df_s['Strategy'].std() * TRADING_DAYS ** 0.5
 
-    period_str      = f"{df_s.index.min().date()} ~ {df_s.index.max().date()}"
-    buy_hold_return = df_s['BuyHoldCumulative'].iloc[-1]
-    strategy_return = df_s['StrategyCumulative'].iloc[-1]
-    strategy_risk   = df_s['Strategy'].std() * TRADING_DAYS ** 0.5
-
-    st.markdown(f"### 📊 策略夏普比率：{sharpe_ratio:.2f}")
-    summary_df = pd.DataFrame({
-        "項目": ["期間", "買入持有報酬率", "策略報酬率", "策略風險（年化波動）", "最大回撤"],
-        "數值": [period_str, f"{buy_hold_return:.2%}", f"{strategy_return:.2%}",
-                 f"{strategy_risk:.2%}", f"{strategy_drawdown:.2%}"]
-    })
     st.markdown("### 📋 策略績效總表")
-    st.table(summary_df)
+    st.table(pd.DataFrame({
+        "項目": ["期間", "買入持有報酬率", "策略報酬率", "策略風險（年化波動）", "最大回撤", "夏普比率"],
+        "數值": [
+            f"{df_s.index.min().date()} ~ {df_s.index.max().date()}",
+            f"{df_s['BuyHoldCumulative'].iloc[-1]:.2%}",
+            f"{df_s['StrategyCumulative'].iloc[-1]:.2%}",
+            f"{strategy_risk:.2%}",
+            f"{strategy_drawdown:.2%}",
+            f"{sharpe_ratio:.2f}",
+        ]
+    }))
 
+    # ✅ 歷史買賣紀錄
+    st.markdown("### 📒 歷史買賣紀錄")
+    df_trades = calc_trade_history(df_s)
+
+    if df_trades.empty:
+        st.info("此期間無完整買賣紀錄")
+    else:
+        # 統計摘要
+        closed = df_trades[df_trades["賣出日期"] != "持倉中"]
+        win_rate = (closed["損益率(%)"] > 0).mean() if len(closed) > 0 else 0
+        avg_pnl  = closed["損益率(%)"].mean() if len(closed) > 0 else 0
+        avg_hold = closed["持有天數"].mean()  if len(closed) > 0 else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("總交易次數", f"{len(closed)} 筆")
+        m2.metric("勝率",       f"{win_rate:.1%}")
+        m3.metric("平均損益率", f"{avg_pnl:.2f}%")
+        m4.metric("平均持有天數", f"{avg_hold:.0f} 天")
+
+        # 完整買賣紀錄表（色彩標示）
+        def color_pnl(val):
+            if isinstance(val, float):
+                return "color: red" if val > 0 else "color: green"
+            return ""
+
+        st.dataframe(
+            df_trades.style.applymap(color_pnl, subset=["損益率(%)"]),
+            use_container_width=True
+        )
+
+        # 損益率分布圖
+        if len(closed) > 0:
+            fig_pnl = px.bar(
+                closed, x="買入日期", y="損益率(%)",
+                color="結果",
+                color_discrete_map={"✅ 獲利": "red", "❌ 虧損": "green"},
+                title="每筆交易損益率",
+                text_auto=".1f"
+            )
+            fig_pnl.add_hline(y=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
+    # ✅ 最新持倉狀態
+    st.markdown("### 🔔 當前持倉狀態")
     last_pos    = df_s['Position'].iloc[-1]
     last_date   = df_s.index[-1].date()
-    signal_text = "空手" if last_pos == 0 else ("持有（買入）" if last_pos == 1 else "放空")
-    st.markdown(f"### 🔔 最新交易訊號：**{signal_text}** （日期：{last_date}）")
+    signal_text = "空手（無持倉）" if last_pos == 0 else ("📈 持有中（買入）" if last_pos == 1 else "📉 放空中")
+
+    # 找出最近一次買入/賣出日期
+    buy_dates  = df_s[df_s['Position'].diff() == 1].index
+    sell_dates = df_s[df_s['Position'].diff() == -1].index
+    last_buy   = buy_dates[-1].date()  if len(buy_dates)  > 0 else "無"
+    last_sell  = sell_dates[-1].date() if len(sell_dates) > 0 else "無"
+
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("今日狀態",     signal_text)
+    sc2.metric("最近買入日",   str(last_buy))
+    sc3.metric("最近賣出日",   str(last_sell))
+
+    if last_pos == 1 and last_buy != "無":
+        current_price = float(df_s['Close'].iloc[-1])
+        entry_price   = float(df_s.loc[df_s.index[df_s.index.get_loc(buy_dates[-1])], 'Close'])
+        unrealized    = (current_price - entry_price) / entry_price * 100
+        st.metric("未實現損益",
+                  f"{unrealized:+.2f}%",
+                  delta_color="normal" if unrealized >= 0 else "inverse")
 
 # =====================
 # 參數最佳化
@@ -285,32 +466,23 @@ if st.button("🚀 開始回測"):
 if has_optimizable and st.button("⚙️ 開始參數最佳化"):
     with st.spinner("載入股價資料..."):
         df = load_price(stock_code, start_date, end_date)
-
     if df.empty:
-        st.error("❌ 無法取得股票資料")
-        st.stop()
-
+        st.error("❌ 無法取得股票資料"); st.stop()
     df = clean_price_data(df)
     if df.empty:
-        st.error("❌ 清理後資料為空")
-        st.stop()
+        st.error("❌ 清理後資料為空"); st.stop()
 
-    # 建立參數網格
     param_names  = []
     param_values = []
     for param, (dtype, p_min, p_max, p_step) in opt_ranges.items():
         param_names.append(param)
-        if dtype == "int":
-            vals = list(range(int(p_min), int(p_max) + 1, int(p_step)))
-        else:
-            vals = [round(v, 4) for v in np.arange(p_min, p_max + p_step * 0.5, p_step)]
+        vals = list(range(int(p_min), int(p_max) + 1, int(p_step))) if dtype == "int" \
+               else [round(v, 4) for v in np.arange(p_min, p_max + p_step * 0.5, p_step)]
         param_values.append(vals)
 
-    # 非最佳化參數（字串類型）維持原值
     fixed_params = {k: v for k, v in params.items() if k not in opt_ranges}
-
-    all_combos = list(product(*param_values))
-    total      = len(all_combos)
+    all_combos   = list(product(*param_values))
+    total        = len(all_combos)
 
     st.info(f"🔄 共 {total} 組參數組合，開始掃描...")
     progress_bar = st.progress(0)
@@ -320,12 +492,9 @@ if has_optimizable and st.button("⚙️ 開始參數最佳化"):
     for i, combo in enumerate(all_combos):
         test_params = dict(zip(param_names, combo))
         test_params.update(fixed_params)
-
         metrics = run_backtest(df, strategy_name, test_params)
         if metrics:
-            row = {**test_params, **metrics}
-            results.append(row)
-
+            results.append({**test_params, **metrics})
         progress_bar.progress((i + 1) / total)
         if (i + 1) % 20 == 0 or (i + 1) == total:
             status_text.text(f"進度：{i+1}/{total} 組完成，有效結果：{len(results)} 組")
@@ -334,35 +503,46 @@ if has_optimizable and st.button("⚙️ 開始參數最佳化"):
     status_text.empty()
 
     if not results:
-        st.error("❌ 所有參數組合均無法產生有效結果，請調整參數範圍")
-        st.stop()
+        st.error("❌ 所有參數組合均無法產生有效結果"); st.stop()
 
     df_opt = pd.DataFrame(results)
-
-    # 依最佳化目標排序
     if opt_target == "最大回撤(%)（最小化）":
-        df_opt = df_opt.sort_values("最大回撤(%)", ascending=True)   # 回撤越小越好
+        df_opt = df_opt.sort_values("最大回撤(%)", ascending=True)
     elif opt_target == "夏普比率":
         df_opt = df_opt.sort_values("夏普比率", ascending=False)
     else:
         df_opt = df_opt.sort_values("累積報酬率(%)", ascending=False)
 
-    best   = df_opt.iloc[0]
-    worst  = df_opt.iloc[-1]
-
+    best = df_opt.iloc[0]
     st.success(f"✅ 掃描完成！共 {len(df_opt)} 組有效結果")
 
-    # ── 最佳參數展示 ──
+    # 最佳參數展示
     st.markdown("### 🏆 最佳參數組合")
     best_cols = st.columns(len(param_names) + 4)
     for i, p in enumerate(param_names):
         best_cols[i].metric(p, best[p])
-    best_cols[len(param_names)].metric("累積報酬率", f"{best['累積報酬率(%)']:.2f}%")
-    best_cols[len(param_names)+1].metric("夏普比率",  f"{best['夏普比率']:.2f}")
-    best_cols[len(param_names)+2].metric("最大回撤",  f"{best['最大回撤(%)']:.2f}%")
-    best_cols[len(param_names)+3].metric("交易次數",  f"{int(best['交易次數'])}")
+    best_cols[len(param_names)].metric("累積報酬率",  f"{best['累積報酬率(%)']:.2f}%")
+    best_cols[len(param_names)+1].metric("夏普比率",   f"{best['夏普比率']:.2f}")
+    best_cols[len(param_names)+2].metric("最大回撤",   f"{best['最大回撤(%)']:.2f}%")
+    best_cols[len(param_names)+3].metric("交易次數",   f"{int(best['交易次數'])}")
 
-    # ── Top 20 結果表 ──
+    # ✅ 把最佳參數存進 session_state，讓儲存按鈕在 rerun 後仍能讀到
+    best_params_to_save = {p: (int(best[p]) if isinstance(strategies[strategy_name]["parameters"][p], int)
+                               else round(float(best[p]), 4))
+                           for p in param_names}
+    best_params_to_save.update(fixed_params)
+    best_metrics = {
+        "累積報酬率(%)": float(best["累積報酬率(%)"]),
+        "夏普比率":       float(best["夏普比率"]),
+        "最大回撤(%)":    float(best["最大回撤(%)"]),
+    }
+    # 存進 session_state 供儲存按鈕使用
+    st.session_state["pending_best_params"]  = best_params_to_save
+    st.session_state["pending_best_metrics"] = best_metrics
+    st.session_state["pending_best_stock"]   = stock_code
+    st.session_state["pending_best_strategy"]= strategy_name
+
+    # Top 20
     st.markdown("### 📋 Top 20 參數組合")
     fmt_dict = {"累積報酬率(%)": "{:.2f}%", "夏普比率": "{:.2f}", "最大回撤(%)": "{:.2f}%"}
     st.dataframe(
@@ -373,55 +553,39 @@ if has_optimizable and st.button("⚙️ 開始參數最佳化"):
         use_container_width=True
     )
 
-    # ── 熱力圖（限兩個 int 參數時顯示）──
+    # 熱力圖
     int_params = [p for p in param_names if opt_ranges[p][0] == "int"]
     if len(int_params) >= 2:
-        p1, p2 = int_params[0], int_params[1]
+        p1, p2     = int_params[0], int_params[1]
         metric_col = "夏普比率" if opt_target == "夏普比率" else "累積報酬率(%)"
-        st.markdown(f"### 🗺️ 參數熱力圖（{p1} × {p2} → {metric_col}）")
-
-        pivot = df_opt.pivot_table(
-            index=p1, columns=p2, values=metric_col, aggfunc="mean"
-        )
-        fig_heat = px.imshow(
-            pivot,
-            labels=dict(x=p2, y=p1, color=metric_col),
-            color_continuous_scale="RdYlGn",
-            title=f"{strategy_name} 參數熱力圖",
-            aspect="auto"
-        )
+        pivot      = df_opt.pivot_table(index=p1, columns=p2, values=metric_col, aggfunc="mean")
+        fig_heat   = px.imshow(pivot, color_continuous_scale="RdYlGn",
+                               title=f"{strategy_name} 參數熱力圖（{p1} × {p2}）", aspect="auto")
         st.plotly_chart(fig_heat, use_container_width=True)
-
-    # ── 單參數折線圖 ──
-    if len(int_params) == 1:
-        p1 = int_params[0]
+    elif len(int_params) == 1:
+        p1         = int_params[0]
         metric_col = "夏普比率" if opt_target == "夏普比率" else "累積報酬率(%)"
-        df_line = df_opt.groupby(p1)[metric_col].mean().reset_index()
-        fig_line = px.line(df_line, x=p1, y=metric_col,
-                           title=f"{p1} 對 {metric_col} 的影響",
-                           markers=True)
+        df_line    = df_opt.groupby(p1)[metric_col].mean().reset_index()
+        fig_line   = px.line(df_line, x=p1, y=metric_col, title=f"{p1} 對 {metric_col} 的影響", markers=True)
         fig_line.add_vline(x=best[p1], line_dash="dash", line_color="red",
                            annotation_text=f"最佳={best[p1]}")
         st.plotly_chart(fig_line, use_container_width=True)
 
-    # ── 用最佳參數直接跑回測 ──
+    # 最佳參數回測圖
     st.markdown("### 📈 使用最佳參數執行回測")
-    best_params = {p: best[p] for p in param_names}
-    best_params.update(fixed_params)
-
-    df_best = apply_strategy(df.copy(), strategy_name, best_params)
-    df_best['DailyReturn']       = df_best['Close'].pct_change()
-    df_best['Strategy']          = df_best['Position'].shift(1) * df_best['DailyReturn']
+    df_best = apply_strategy(df.copy(), strategy_name, best_params_to_save)
+    df_best['DailyReturn']        = df_best['Close'].pct_change()
+    df_best['Strategy']           = df_best['Position'].shift(1) * df_best['DailyReturn']
     df_best = df_best.dropna(subset=['DailyReturn', 'Strategy'])
     df_best = df_best[df_best['DailyReturn'].abs() < 0.5]
-    df_best['BuyHoldCumulative'] = (1 + df_best['DailyReturn']).cumprod() - 1
+    df_best['BuyHoldCumulative']  = (1 + df_best['DailyReturn']).cumprod() - 1
     df_best['StrategyCumulative'] = (1 + df_best['Strategy']).cumprod() - 1
-
     st.plotly_chart(plot_strategy_performance(df_best), use_container_width=True)
 
-    # 最佳 vs 原始參數比較表
+    # 原始 vs 最佳比較
     orig_metrics = run_backtest(df, strategy_name, params)
-    compare_df = pd.DataFrame({
+    st.markdown("### ⚖️ 原始參數 vs 最佳化參數比較")
+    st.table(pd.DataFrame({
         "項目": ["累積報酬率(%)", "夏普比率", "最大回撤(%)", "交易次數"],
         "原始參數": [
             f"{orig_metrics['累積報酬率(%)']:.2f}%" if orig_metrics else "N/A",
@@ -435,11 +599,42 @@ if has_optimizable and st.button("⚙️ 開始參數最佳化"):
             f"{best['最大回撤(%)']:.2f}%",
             str(int(best['交易次數'])),
         ]
-    })
-    st.markdown("### ⚖️ 原始參數 vs 最佳化參數比較")
-    st.table(compare_df)
+    }))
 
     st.warning(
-        "⚠️ **過度擬合警告**：參數最佳化是基於歷史資料，最佳參數在樣本內表現好，"
-        "不代表未來同樣有效。建議搭配樣本外驗證（Walk-Forward）使用。"
+        "⚠️ **過度擬合警告**：參數最佳化基於歷史資料，最佳參數不代表未來同樣有效。"
+        "建議搭配不同時間段驗證。"
     )
+# =====================
+# 儲存最佳參數區塊（在最佳化 block 外，避免 rerun 後變數消失）
+# =====================
+if "pending_best_params" in st.session_state:
+    pending_stock    = st.session_state.get("pending_best_stock", "")
+    pending_strategy = st.session_state.get("pending_best_strategy", "")
+    pending_params   = st.session_state["pending_best_params"]
+    pending_metrics  = st.session_state["pending_best_metrics"]
+
+    st.markdown("---")
+    st.markdown("### 💾 儲存最佳化結果")
+    st.info(
+        f"**{pending_stock} × {pending_strategy}** 最佳參數：" +
+        "、".join([f"{k}={v}" for k, v in pending_params.items()]) +
+        f"　｜　報酬率 {pending_metrics['累積報酬率(%)']:.2f}%、"
+        f"夏普 {pending_metrics['夏普比率']:.2f}、"
+        f"回撤 {pending_metrics['最大回撤(%)']:.2f}%"
+    )
+
+    col_s1, col_s2 = st.columns([2, 1])
+    with col_s1:
+        if st.button("💾 儲存最佳參數（供回測 & 策略比較使用）", type="primary"):
+            save_best_params(pending_stock, pending_strategy, pending_params, pending_metrics)
+            # 儲存後更新 session_state，讓套用 checkbox 立即出現
+            ss_key = f"use_best_{pending_stock}_{pending_strategy}"
+            st.session_state[ss_key] = True
+            del st.session_state["pending_best_params"]
+            st.success("✅ 已儲存！頁面將重新整理，套用最佳參數進行回測。")
+            st.rerun()
+    with col_s2:
+        if st.button("🗑️ 捨棄", help="不儲存此次最佳化結果"):
+            del st.session_state["pending_best_params"]
+            st.rerun()

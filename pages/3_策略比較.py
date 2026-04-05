@@ -9,6 +9,17 @@ import requests
 from strategy import apply_strategy, strategies, stock_list
 from database import load_stock_prices, save_stock_prices
 
+BEST_PARAM_FILE = "user_best_params.json"
+
+def load_best_params():
+    if os.path.exists(BEST_PARAM_FILE):
+        try:
+            with open(BEST_PARAM_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
 st.title("📊 多股票多策略回測比較")
 
 # =====================
@@ -71,6 +82,29 @@ default_strategies = [s for s in default_strategies if s in strategy_names]
 stocks_selected = st.multiselect("選擇股票（多選）", stock_options, default=default_stocks)
 strategies_selected = st.multiselect("選擇策略（多選）", strategy_names, default=default_strategies)
 stock_codes = [s.split("(")[-1].strip(")") for s in stocks_selected]
+
+# ✅ 最佳參數選項
+best_params_db = load_best_params()
+use_best_params = st.checkbox(
+    "🏆 使用已儲存的最佳化參數（從回測系統儲存）",
+    value=False,
+    help="若回測系統已執行參數最佳化並儲存，勾選此項可自動套用最佳參數"
+)
+
+# 顯示目前已有最佳參數的組合
+if use_best_params and best_params_db:
+    available = []
+    for key, val in best_params_db.items():
+        available.append(
+            f"✅ {val['stock_code']} × {val['strategy_name']}：" +
+            "、".join([f"{k}={v}" for k, v in val["params"].items()]) +
+            f"（{val['saved_at']}）"
+        )
+    with st.expander("📋 已儲存的最佳參數清單", expanded=True):
+        for a in available:
+            st.caption(a)
+elif use_best_params and not best_params_db:
+    st.warning("⚠️ 尚無儲存的最佳參數，請先至「回測系統」執行參數最佳化並儲存。")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -253,7 +287,14 @@ if st.button("🚀 執行回測比較"):
             continue
 
         for strat in strategies_selected:
-            params = strategies[strat]["parameters"]
+            # ✅ 優先使用最佳化參數，否則使用預設參數
+            best_key = f"{stock_code}_{strat}"
+            if use_best_params and best_key in best_params_db:
+                params = best_params_db[best_key]["params"]
+                st.caption(f"🏆 {stock_code} × {strat} 使用最佳化參數：" +
+                           "、".join([f"{k}={v}" for k, v in params.items()]))
+            else:
+                params = strategies[strat]["parameters"]
             try:
                 df_strategy = apply_strategy(df.copy(), strat, params)
             except Exception as e:
