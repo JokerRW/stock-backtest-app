@@ -7,7 +7,12 @@ import yfinance as yf
 import plotly.graph_objs as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from FinMind.data import DataLoader
+# FinMind 在部分環境可能安裝失敗，用 try/except 保護
+try:
+    from FinMind.data import DataLoader
+    FINMIND_AVAILABLE = True
+except ImportError:
+    FINMIND_AVAILABLE = False
 from strategy import apply_strategy, strategies, stock_list
 
 st.title("📈 台股財報 × 策略回測整合分析")
@@ -49,6 +54,10 @@ with st.sidebar:
         st.success("✅ Token 已輸入")
     else:
         st.warning("⚠️ 尚未輸入 Token，財報資料無法載入")
+
+if not FINMIND_AVAILABLE:
+    st.error("❌ FinMind 套件安裝失敗，財報功能無法使用。請確認 requirements.txt 已包含 finmind 並重新部署。")
+    st.stop()
 
 if not finmind_token:
     st.info("👈 請先在左側輸入 FinMind API Token 才能使用此功能")
