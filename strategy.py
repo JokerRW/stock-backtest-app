@@ -6,14 +6,46 @@ import sqlite3
 _IS_CLOUD = os.path.exists("/mount/src")
 _DB_DIR   = "/tmp" if _IS_CLOUD else "."
 
-# 從資料庫讀取股票清單 (code + name)
+# 內建預設股票清單（Streamlit Cloud 上 stocks.db 不存在時的 fallback）
+DEFAULT_STOCKS = {
+    "0050.TW":  "元大台灣50",
+    "0056.TW":  "元大高股息",
+    "00878.TW": "國泰永續高股息",
+    "00919.TW": "群益台灣精選高息",
+    "2330.TW":  "台積電",
+    "2317.TW":  "鴻海",
+    "2454.TW":  "聯發科",
+    "2308.TW":  "台達電",
+    "2412.TW":  "中華電",
+    "2882.TW":  "國泰金",
+    "2881.TW":  "富邦金",
+    "2886.TW":  "兆豐金",
+    "1301.TW":  "台塑",
+    "1303.TW":  "南亞",
+    "1101.TW":  "台泥",
+    "2002.TW":  "中鋼",
+    "2382.TW":  "廣達",
+    "3711.TW":  "日月光投控",
+    "2303.TW":  "聯電",
+    "2357.TW":  "華碩",
+}
+
+# 從資料庫讀取股票清單，失敗時回傳預設清單
 def load_stock_list_from_db(db_path=None):
     if db_path is None:
         db_path = os.path.join(_DB_DIR, "stocks.db")
-    conn = sqlite3.connect(db_path)
-    df = pd.read_sql("SELECT code, name FROM stock_list", conn)
-    conn.close()
-    return df
+    try:
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"stocks.db 不存在：{db_path}")
+        conn = sqlite3.connect(db_path)
+        df = pd.read_sql("SELECT code, name FROM stock_list", conn)
+        conn.close()
+        if df.empty:
+            raise ValueError("stock_list 資料表為空")
+        return df
+    except Exception:
+        # DB 不存在或查詢失敗 → 使用內建預設清單
+        return pd.DataFrame(list(DEFAULT_STOCKS.items()), columns=["code", "name"])
 
 # 根據關鍵字搜尋股票清單 (code 或 name)
 def search_stocks(keyword, df_stock):
