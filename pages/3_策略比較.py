@@ -108,7 +108,7 @@ elif use_best_params and not best_params_db:
 
 col1, col2 = st.columns(2)
 with col1:
-    start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
+    start_date = st.date_input("開始日期", pd.to_datetime("2024-01-01"))
 with col2:
     end_date = st.date_input("結束日期", pd.to_datetime("today"))
 

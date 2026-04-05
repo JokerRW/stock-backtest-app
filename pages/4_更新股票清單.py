@@ -1,7 +1,13 @@
+import os
 import streamlit as st
 import pandas as pd
 import sqlite3
 import requests
+
+# Streamlit Cloud 唯讀目錄，資料庫改存 /tmp/
+_IS_CLOUD = os.path.exists("/mount/src")
+_DB_DIR   = "/tmp" if _IS_CLOUD else "."
+STOCKS_DB = os.path.join(_DB_DIR, "stocks.db")
 
 st.set_page_config(page_title="更新台灣股票清單", layout="wide")
 st.title("📈 更新台灣股票清單（含上市股票）")
@@ -33,7 +39,7 @@ def fetch_tw_stock_list():
         return pd.DataFrame()
 
 def save_stock_list_to_db(df):
-    conn = sqlite3.connect("stocks.db")
+    conn = sqlite3.connect(STOCKS_DB)
     df.to_sql("stock_list", conn, if_exists="replace", index=False)
     conn.close()
 
@@ -50,7 +56,7 @@ if st.button("📥 抓取並更新股票清單"):
             st.dataframe(df_stocks.head(10), use_container_width=True)
 
 # 顯示目前資料庫內容
-conn = sqlite3.connect("stocks.db")
+conn = sqlite3.connect(STOCKS_DB)
 try:
     df_db = pd.read_sql("SELECT * FROM stock_list", conn)
     st.subheader("🗂️ 資料庫中股票清單：")

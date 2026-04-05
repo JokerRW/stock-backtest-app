@@ -60,7 +60,7 @@ stock_code   = stock_select.split("(")[-1].strip(")")
 
 col_d1, col_d2 = st.columns(2)
 with col_d1:
-    start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
+    start_date = st.date_input("開始日期", pd.to_datetime("2024-01-01"))
 with col_d2:
     end_date   = st.date_input("結束日期", pd.to_datetime("today"))
 

@@ -1,11 +1,16 @@
 # database.py
+import os
 import pandas as pd
 from sqlalchemy import create_engine, text
 import json
 
 # 資料庫連線設定
-DB_PATH = "sqlite:///stock_data.db"
-engine = create_engine(DB_PATH, echo=False, future=True)
+# 本機：使用當前目錄
+# Streamlit Cloud：工作目錄唯讀，改用 /tmp/ 避免 OperationalError
+_IS_CLOUD = os.path.exists("/mount/src")
+_DB_DIR   = "/tmp" if _IS_CLOUD else "."
+DB_PATH   = f"sqlite:///{_DB_DIR}/stock_data.db"
+engine    = create_engine(DB_PATH, echo=False, future=True)
 
 # 建立資料庫的兩張表格（若尚未存在）
 def init_db():

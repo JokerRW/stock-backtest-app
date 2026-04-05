@@ -1,8 +1,15 @@
+import os
 import pandas as pd
 import sqlite3
 
+# Streamlit Cloud 唯讀目錄，資料庫改存 /tmp/
+_IS_CLOUD = os.path.exists("/mount/src")
+_DB_DIR   = "/tmp" if _IS_CLOUD else "."
+
 # 從資料庫讀取股票清單 (code + name)
-def load_stock_list_from_db(db_path="stocks.db"):
+def load_stock_list_from_db(db_path=None):
+    if db_path is None:
+        db_path = os.path.join(_DB_DIR, "stocks.db")
     conn = sqlite3.connect(db_path)
     df = pd.read_sql("SELECT code, name FROM stock_list", conn)
     conn.close()
