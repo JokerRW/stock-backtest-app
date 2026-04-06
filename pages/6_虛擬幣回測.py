@@ -5,6 +5,7 @@ import plotly.graph_objs as go
 import plotly.express as px
 from itertools import product
 from strategy import apply_strategy, strategies
+from risk import apply_friction_and_risk, calc_performance, build_risk_ui
 import ccxt
 import time
 import os
@@ -115,6 +116,9 @@ with col2:
 interval_options = {"日線": "1d", "4 小時線": "4h", "1 小時線": "1h", "30 分鐘線": "30m"}
 interval_name    = st.selectbox("選擇 K 線週期", list(interval_options.keys()), index=0)
 interval         = interval_options[interval_name]
+
+# ✅ 摩擦成本 & 停損停利設定
+risk_cfg = build_risk_ui(prefix="crypto_", market="crypto")
 
 # 策略選擇（單選，供最佳化使用）
 st.markdown("### 📌 選擇策略")
@@ -260,14 +264,19 @@ def convert_to_usdt(df, symbol, start_date, end_date, interval):
             df.drop(columns=['Close_BTC'], inplace=True)
     return df
 
-def run_strategy(df, strat_name, custom_params=None):
+def run_strategy(df, strat_name, custom_params=None, risk_cfg=None):
     p = custom_params if custom_params else strategies[strat_name]["parameters"]
     if "function" in strategies[strat_name]:
         df = strategies[strat_name]["function"](df.copy(), p)
     else:
         df = apply_strategy(df.copy(), strat_name, p)
+    # ✅ 套用摩擦成本 & 停損停利
+    if risk_cfg:
+        df = apply_friction_and_risk(df, **risk_cfg)
+    else:
+        df['DailyReturn'] = df['Close'].pct_change()
+        df['Strategy']    = df['Position'].shift(1) * df['DailyReturn']
     df['DailyReturn'] = df['Close'].pct_change()
-    df['Strategy']    = df['Position'].shift(1) * df['DailyReturn']
     df = df.dropna(subset=['DailyReturn', 'Strategy'])
     return df
 
@@ -282,9 +291,9 @@ def calc_metrics(df):
         "交易次數":       int((df['Position'].diff().abs() > 0).sum()),
     }
 
-def run_backtest_opt(df, strat_name, test_params):
+def run_backtest_opt(df, strat_name, test_params, risk_cfg=None):
     try:
-        df_s = run_strategy(df, strat_name, test_params)
+        df_s = run_strategy(df, strat_name, test_params, risk_cfg=risk_cfg)
         return calc_metrics(df_s) if not df_s.empty else None
     except Exception:
         return None
@@ -332,7 +341,7 @@ if st.button("🚀 開始回測"):
 
         st.markdown(f"---\n### 🪙 {crypto_code}")
         try:
-            df = run_strategy(df_raw, strategy_name, params)
+            df = run_strategy(df_raw, strategy_name, params, risk_cfg=risk_cfg)
         except Exception as e:
             st.warning(f"⚠️ {crypto_code} × {strategy_name} 執行失敗：{e}"); continue
 
@@ -410,7 +419,7 @@ if has_optimizable and st.button("⚙️ 開始參數最佳化"):
     for i, combo in enumerate(all_combos):
         test_params = dict(zip(param_names, combo))
         test_params.update(fixed_params)
-        m = run_backtest_opt(df_raw, strategy_name, test_params)
+        m = run_backtest_opt(df_raw, strategy_name, test_params, risk_cfg=risk_cfg)
         if m:
             results.append({**test_params, **m})
         progress_bar.progress((i+1)/total)
@@ -493,7 +502,7 @@ if has_optimizable and st.button("⚙️ 開始參數最佳化"):
         st.plotly_chart(fig_best, use_container_width=True)
 
     # 原始 vs 最佳比較
-    orig_m = run_backtest_opt(df_raw, strategy_name, params)
+    orig_m = run_backtest_opt(df_raw, strategy_name, params, risk_cfg=risk_cfg)
     st.markdown("### ⚖️ 原始參數 vs 最佳化參數比較")
     st.table(pd.DataFrame({
         "項目": ["累積報酬率(%)", "夏普比率", "最大回撤(%)", "交易次數"],

@@ -6,6 +6,7 @@ import plotly.express as px
 from itertools import product
 from strategy import apply_strategy, strategies, stock_list
 from database import load_stock_prices, save_stock_prices, delete_stock_prices
+from risk import apply_friction_and_risk, calc_performance, build_risk_ui
 import yfinance as yf
 import os
 import json
@@ -128,6 +129,9 @@ if (end_date - start_date).days < min_days_required:
     st.warning(f"⚠️ 資料區間太短（{(end_date - start_date).days} 天），至少需要 {min_days_required} 天")
     st.stop()
 
+# ✅ 摩擦成本 & 停損停利設定
+risk_cfg = build_risk_ui(prefix="bt_", market="stock")
+
 # =====================
 # 輔助函式
 # =====================
@@ -158,26 +162,22 @@ def load_price(stock_code, start_date, end_date):
             save_stock_prices(df, stock_code)
     return df
 
-def run_backtest(df, strategy_name, params):
+def run_backtest(df, strategy_name, params, risk_cfg=None):
     try:
         df_s = apply_strategy(df.copy(), strategy_name, params)
     except Exception:
         return None
+    if risk_cfg:
+        df_s = apply_friction_and_risk(df_s, **risk_cfg)
+    else:
+        df_s['DailyReturn'] = df_s['Close'].pct_change()
+        df_s['Strategy']    = df_s['Position'].shift(1) * df_s['DailyReturn']
     df_s['DailyReturn'] = df_s['Close'].pct_change()
-    df_s['Strategy']    = df_s['Position'].shift(1) * df_s['DailyReturn']
     df_s = df_s.dropna(subset=['DailyReturn', 'Strategy'])
     df_s = df_s[df_s['DailyReturn'].abs() < 0.5]
     if df_s.empty:
         return None
-    cum_s  = (1 + df_s['Strategy']).cumprod()
-    sharpe = (df_s['Strategy'].mean() / df_s['Strategy'].std() * TRADING_DAYS ** 0.5
-              if df_s['Strategy'].std() != 0 else 0)
-    return {
-        "累積報酬率(%)": round((cum_s.iloc[-1] - 1) * 100, 2),
-        "夏普比率":       round(sharpe, 2),
-        "最大回撤(%)":    round(((cum_s - cum_s.cummax()) / cum_s.cummax()).min() * 100, 2),
-        "交易次數":       int((df_s['Position'].diff().abs() > 0).sum()),
-    }
+    return calc_performance(df_s, TRADING_DAYS)
 
 # ✅ 歷史買賣紀錄計算
 def calc_trade_history(df_s):
@@ -226,14 +226,25 @@ def calc_trade_history(df_s):
         trades.append({
             "買入日期":  entry_date.date(),
             "買入價格":  round(float(entry_price), 2),
-            "賣出日期":  "持倉中",
+            "賣出日期":  None,           # ✅ 用 None 避免型別混雜導致 pyarrow 報錯
             "賣出價格":  round(float(last_price), 2),
             "持有天數":  (dates[-1] - entry_date).days,
             "損益率(%)": round(pnl * 100, 2),
             "結果":      "🔄 持倉中",
         })
 
-    return pd.DataFrame(trades)
+    df_t = pd.DataFrame(trades)
+    if not df_t.empty:
+        # 統一欄位型別：賣出日期轉字串，None 顯示為「持倉中」
+        df_t["賣出日期"] = df_t["賣出日期"].apply(
+            lambda x: str(x) if x is not None else "持倉中"
+        )
+        # 確保數值欄位是 float，避免 pyarrow 型別混雜
+        df_t["買入價格"] = df_t["買入價格"].astype(float)
+        df_t["賣出價格"] = df_t["賣出價格"].astype(float)
+        df_t["持有天數"] = df_t["持有天數"].astype(int)
+        df_t["損益率(%)"] = df_t["損益率(%)"].astype(float)
+    return df_t
 
 def plot_candlestick_with_signals(df_s):
     """蠟燭圖 + 買賣訊號標記"""
@@ -356,8 +367,16 @@ if st.button("🚀 開始回測"):
     except Exception as e:
         st.error(f"策略執行失敗：{e}"); st.stop()
 
+    # ✅ 套用摩擦成本 & 停損停利
+    df_s = apply_friction_and_risk(
+        df_s,
+        buy_fee=risk_cfg["buy_fee"],
+        sell_fee=risk_cfg["sell_fee"],
+        sell_tax=risk_cfg["sell_tax"],
+        stop_loss=risk_cfg["stop_loss"],
+        take_profit=risk_cfg["take_profit"],
+    )
     df_s['DailyReturn'] = df_s['Close'].pct_change()
-    df_s['Strategy']    = df_s['Position'].shift(1) * df_s['DailyReturn']
     df_s = df_s.dropna(subset=['DailyReturn', 'Strategy'])
     abnormal = df_s['DailyReturn'].abs() >= 0.5
     if abnormal.any():
@@ -365,6 +384,12 @@ if st.button("🚀 開始回測"):
         df_s = df_s[~abnormal]
     if df_s.empty:
         st.error("❌ 回測結果為空"); st.stop()
+
+    # 顯示停損停利觸發次數
+    if 'StopTriggered' in df_s.columns:
+        n_stop = df_s['StopTriggered'].sum()
+        if n_stop > 0:
+            st.info(f"🛑 停損/停利共觸發 {n_stop} 次")
 
     df_s['BuyHoldCumulative']  = (1 + df_s['DailyReturn']).cumprod() - 1
     df_s['StrategyCumulative'] = (1 + df_s['Strategy']).cumprod() - 1
@@ -381,8 +406,9 @@ if st.button("🚀 開始回測"):
     strategy_risk     = df_s['Strategy'].std() * TRADING_DAYS ** 0.5
 
     st.markdown("### 📋 策略績效總表")
+    total_cost = df_s['TradeCost'].sum() if 'TradeCost' in df_s.columns else 0
     st.table(pd.DataFrame({
-        "項目": ["期間", "買入持有報酬率", "策略報酬率", "策略風險（年化波動）", "最大回撤", "夏普比率"],
+        "項目": ["期間", "買入持有報酬率", "策略報酬率（含成本）", "策略風險（年化波動）", "最大回撤", "夏普比率", "總手續費成本"],
         "數值": [
             f"{df_s.index.min().date()} ~ {df_s.index.max().date()}",
             f"{df_s['BuyHoldCumulative'].iloc[-1]:.2%}",
@@ -390,6 +416,7 @@ if st.button("🚀 開始回測"):
             f"{strategy_risk:.2%}",
             f"{strategy_drawdown:.2%}",
             f"{sharpe_ratio:.2f}",
+            f"{total_cost:.4%}",
         ]
     }))
 
@@ -401,7 +428,7 @@ if st.button("🚀 開始回測"):
         st.info("此期間無完整買賣紀錄")
     else:
         # 統計摘要
-        closed = df_trades[df_trades["賣出日期"] != "持倉中"]
+        closed = df_trades[df_trades["結果"] != "🔄 持倉中"]
         win_rate = (closed["損益率(%)"] > 0).mean() if len(closed) > 0 else 0
         avg_pnl  = closed["損益率(%)"].mean() if len(closed) > 0 else 0
         avg_hold = closed["持有天數"].mean()  if len(closed) > 0 else 0

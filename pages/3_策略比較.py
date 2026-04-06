@@ -8,6 +8,7 @@ import plotly.express as px
 import requests
 from strategy import apply_strategy, strategies, stock_list
 from database import load_stock_prices, save_stock_prices
+from risk import apply_friction_and_risk, calc_performance, build_risk_ui
 
 BEST_PARAM_FILE = "user_best_params.json"
 
@@ -108,9 +109,12 @@ elif use_best_params and not best_params_db:
 
 col1, col2 = st.columns(2)
 with col1:
-    start_date = st.date_input("開始日期", pd.to_datetime("2024-01-01"))
+    start_date = st.date_input("開始日期", pd.to_datetime("2022-01-01"))
 with col2:
     end_date = st.date_input("結束日期", pd.to_datetime("today"))
+
+# ✅ 摩擦成本 & 停損停利設定
+risk_cfg = build_risk_ui(prefix="cmp_", market="stock")
 
 # =====================
 # 輔助函式
@@ -301,8 +305,16 @@ if st.button("🚀 執行回測比較"):
                 st.warning(f"{stock_code} × {strat} 策略套用失敗: {e}")
                 continue
 
+            # ✅ 套用摩擦成本 & 停損停利
+            df_strategy = apply_friction_and_risk(
+                df_strategy,
+                buy_fee=risk_cfg["buy_fee"],
+                sell_fee=risk_cfg["sell_fee"],
+                sell_tax=risk_cfg["sell_tax"],
+                stop_loss=risk_cfg["stop_loss"],
+                take_profit=risk_cfg["take_profit"],
+            )
             df_strategy['DailyReturn'] = df_strategy['Close'].pct_change()
-            df_strategy['Strategy'] = df_strategy['Position'].shift(1) * df_strategy['DailyReturn']
             df_strategy = df_strategy.dropna(subset=['DailyReturn', 'Strategy'])
             df_strategy = df_strategy[df_strategy['DailyReturn'].abs() < 0.5]
 
@@ -310,21 +322,16 @@ if st.button("🚀 執行回測比較"):
                 st.warning(f"{stock_code} × {strat} 策略結果為空，跳過")
                 continue
 
-            cum_return   = calc_cumulative_return(df_strategy['Strategy'])
-            sharpe_ratio = (
-                (df_strategy['Strategy'].mean() / df_strategy['Strategy'].std()) * (TRADING_DAYS ** 0.5)
-                if df_strategy['Strategy'].std() != 0 else 0
-            )
-            mdd = max_drawdown(df_strategy['Strategy'])
-
+            m = calc_performance(df_strategy, TRADING_DAYS)
             results.append({
                 "股票": stock_list.get(stock_code, stock_code),
                 "股票代號": stock_code,
                 "策略": strat,
                 "期間": f"{start_date} ~ {end_date}",
-                "累積報酬率(%)": round(cum_return * 100, 2),
-                "夏普比率": round(sharpe_ratio, 2),
-                "最大回撤(%)": round(mdd * 100, 2),
+                "累積報酬率(%)": m["累積報酬率(%)"],
+                "夏普比率": m["夏普比率"],
+                "最大回撤(%)": m["最大回撤(%)"],
+                "總手續費(%)": m["總手續費成本(%)"],
             })
 
     # =====================
@@ -340,7 +347,8 @@ if st.button("🚀 執行回測比較"):
     st.dataframe(df_results.style.format({
         '累積報酬率(%)': '{:.2f}%',
         '夏普比率': '{:.2f}',
-        '最大回撤(%)': '{:.2f}%'
+        '最大回撤(%)': '{:.2f}%',
+        '總手續費(%)': '{:.4f}%',
     }), use_container_width=True)
 
     fig = px.bar(
