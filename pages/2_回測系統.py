@@ -462,22 +462,51 @@ if st.button("🚀 開始回測"):
             fig_pnl.add_hline(y=0, line_dash="dash", line_color="gray")
             st.plotly_chart(fig_pnl, use_container_width=True)
 
-    # ✅ 最新持倉狀態
-    st.markdown("### 🔔 當前持倉狀態")
-    last_pos    = df_s['Position'].iloc[-1]
-    last_date   = df_s.index[-1].date()
-    signal_text = "空手（無持倉）" if last_pos == 0 else ("📈 持有中（買入）" if last_pos == 1 else "📉 放空中")
+    # ✅ 最新持倉狀態（優先使用 Position_adj，即套用停損停利後的持倉）
+    st.markdown("---")
+    st.markdown("### 🔔 今日操作建議")
+    pos_col    = 'Position_adj' if 'Position_adj' in df_s.columns else 'Position'
+    last_pos   = int(df_s[pos_col].iloc[-1])
+    last_date  = df_s.index[-1].date()
+
+    if last_pos == 1:
+        signal_text  = "📈 持有（買入）"
+        signal_color = "normal"
+    elif last_pos == -1:
+        signal_text  = "📉 放空中"
+        signal_color = "inverse"
+    else:
+        signal_text  = "🟡 空手（無持倉）"
+        signal_color = "off"
 
     # 找出最近一次買入/賣出日期
-    buy_dates  = df_s[df_s['Position'].diff() == 1].index
-    sell_dates = df_s[df_s['Position'].diff() == -1].index
+    buy_dates  = df_s[df_s[pos_col].diff() == 1].index
+    sell_dates = df_s[df_s[pos_col].diff() == -1].index
     last_buy   = buy_dates[-1].date()  if len(buy_dates)  > 0 else "無"
     last_sell  = sell_dates[-1].date() if len(sell_dates) > 0 else "無"
 
     sc1, sc2, sc3 = st.columns(3)
-    sc1.metric("今日狀態",     signal_text)
-    sc2.metric("最近買入日",   str(last_buy))
-    sc3.metric("最近賣出日",   str(last_sell))
+    sc1.metric("📅 資料最新日期", str(last_date))
+    sc2.metric("🔔 當前建議操作", signal_text)
+    sc3.metric("最近買入日",      str(last_buy))
+
+    # 若目前持倉中，顯示未實現損益
+    if last_pos == 1 and last_buy != "無":
+        try:
+            entry_price   = float(df_s.loc[buy_dates[-1], 'Close'])
+            current_price = float(df_s['Close'].iloc[-1])
+            unrealized    = (current_price - entry_price) / entry_price * 100
+            pnl_str       = f"{unrealized:+.2f}%"
+            sc3.metric("未實現損益",
+                       pnl_str,
+                       delta=pnl_str,
+                       delta_color="normal" if unrealized >= 0 else "inverse")
+        except Exception:
+            pass
+
+    # 最近賣出日另外顯示
+    if last_sell != "無":
+        st.caption(f"最近賣出日：{last_sell}")
 
     if last_pos == 1 and last_buy != "無":
         current_price = float(df_s['Close'].iloc[-1])
