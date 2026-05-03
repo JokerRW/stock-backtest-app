@@ -245,5 +245,51 @@
       "最大回撤(%)": -50.99
     },
     "saved_at": "2026-04-26 21:01"
+  },
+  "ETH/USDT_SMA/Hull 趨勢策略": {
+    "stock_code": "ETH/USDT",
+    "strategy_name": "SMA/Hull 趨勢策略",
+    "params": {
+      "n1": 20,
+      "n2": 140,
+      "type": "hull"
+    },
+    "metrics": {
+      "累積報酬率(%)": 59.4,
+      "夏普比率": 0.27,
+      "最大回撤(%)": -47.75
+    },
+    "saved_at": "2026-04-28 20:53"
+  },
+  "ETH/USDT_Ichimoku 一目均衡表策略": {
+    "stock_code": "ETH/USDT",
+    "strategy_name": "Ichimoku 一目均衡表策略",
+    "params": {
+      "Tenkan 週期": 1,
+      "Kijun 週期": 26,
+      "Senkou B 週期": 47
+    },
+    "metrics": {
+      "累積報酬率(%)": 82.06,
+      "夏普比率": 0.27,
+      "最大回撤(%)": -36.44
+    },
+    "saved_at": "2026-05-03 16:00"
+  },
+  "ETH/USDT_布林通道收縮突破策略": {
+    "stock_code": "ETH/USDT",
+    "strategy_name": "布林通道收縮突破策略",
+    "params": {
+      "布林週期": 15,
+      "布林倍數": 2.0,
+      "KC 倍數": 1.25,
+      "收縮判斷週期": 20
+    },
+    "metrics": {
+      "累積報酬率(%)": 147.77,
+      "夏普比率": 0.45,
+      "最大回撤(%)": -43.25
+    },
+    "saved_at": "2026-05-03 16:03"
   }
 }

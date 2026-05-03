@@ -300,6 +300,228 @@ def vwap_strategy(df, params):
     df['Position'] = positions
     return df
 
+def ichimoku_strategy(df, params):
+    """
+    Ichimoku Cloud (一目均衡表) 策略：
+    同時提供趨勢方向、動能與支撐阻力的複合指標。
+    買入條件：價格在雲上方 + Tenkan > Kijun（多重確認）
+    賣出條件：價格在雲下方 或 Tenkan < Kijun
+    2025 年研究公認最適合趨勢型虛擬幣市場的進階策略。
+    """
+    tenkan_p = int(params.get("Tenkan 週期", 9))
+    kijun_p  = int(params.get("Kijun 週期", 26))
+    senkou_p = int(params.get("Senkou B 週期", 52))
+    df = df.copy()
+
+    def mid(h, l, n):
+        return (h.rolling(n).max() + l.rolling(n).min()) / 2
+
+    tenkan  = mid(df["High"], df["Low"], tenkan_p)
+    kijun   = mid(df["High"], df["Low"], kijun_p)
+    span_a  = ((tenkan + kijun) / 2).shift(kijun_p)
+    span_b  = mid(df["High"], df["Low"], senkou_p).shift(kijun_p)
+    cloud_top    = pd.concat([span_a, span_b], axis=1).max(axis=1)
+    cloud_bottom = pd.concat([span_a, span_b], axis=1).min(axis=1)
+
+    # 買入：價格在雲上方 且 Tenkan 上穿 Kijun
+    above_cloud = df["Close"] > cloud_top
+    tk_cross_up  = (tenkan > kijun) & (tenkan.shift(1) <= kijun.shift(1))
+    buy  = (above_cloud & tk_cross_up).fillna(False)
+
+    # 賣出：價格跌入雲下方 或 Tenkan 下穿 Kijun
+    below_cloud  = df["Close"] < cloud_bottom
+    tk_cross_dn  = (tenkan < kijun) & (tenkan.shift(1) >= kijun.shift(1))
+    sell = (below_cloud | tk_cross_dn).fillna(False)
+
+    position, positions = 0, []
+    for i in range(len(df)):
+        if sell.iloc[i]:   position = 0
+        elif buy.iloc[i]:  position = 1
+        positions.append(position)
+    df["Position"] = positions
+    return df
+
+
+def bollinger_squeeze_strategy(df, params):
+    """
+    布林通道收縮突破策略 (Bollinger Squeeze)：
+    布林帶寬度縮窄至歷史低點（Squeeze）後，
+    價格方向性突破時進場，捕捉大波動啟動點。
+    結合動能方向（收盤與均線相對位置）決定多空。
+    """
+    bb_period  = int(params.get("布林週期", 20))
+    bb_mult    = float(params.get("布林倍數", 2.0))
+    kc_mult    = float(params.get("KC 倍數", 1.5))
+    sq_period  = int(params.get("收縮判斷週期", 20))
+    df = df.copy()
+
+    # 布林通道
+    ma   = df["Close"].rolling(bb_period).mean()
+    std  = df["Close"].rolling(bb_period).std()
+    bb_u = ma + bb_mult * std
+    bb_l = ma - bb_mult * std
+    bb_w = (bb_u - bb_l) / ma  # 帶寬
+
+    # Keltner Channel（用於判斷 Squeeze）
+    tr     = pd.concat([
+        df["High"] - df["Low"],
+        (df["High"] - df["Close"].shift(1)).abs(),
+        (df["Low"]  - df["Close"].shift(1)).abs()
+    ], axis=1).max(axis=1)
+    atr    = tr.rolling(bb_period).mean()
+    kc_u   = ma + kc_mult * atr
+    kc_l   = ma - kc_mult * atr
+
+    # Squeeze：布林帶在 Keltner Channel 內
+    squeeze = (bb_u < kc_u) & (bb_l > kc_l)
+
+    # 收縮結束後帶寬擴張（突破訊號）
+    bb_w_min = bb_w.rolling(sq_period).min()
+    expanding = (bb_w > bb_w.shift(1)) & squeeze.shift(1)
+
+    # 方向：收盤在均線上方為多頭突破
+    buy  = (expanding & (df["Close"] > ma)).fillna(False)
+    sell = (expanding & (df["Close"] < ma)).fillna(False)
+
+    position, positions = 0, []
+    for i in range(len(df)):
+        if sell.iloc[i]:   position = 0
+        elif buy.iloc[i]:  position = 1
+        positions.append(position)
+    df["Position"] = positions
+    return df
+
+
+def rsi_divergence_strategy(df, params):
+    """
+    RSI 背離策略：
+    價格創新高但 RSI 未創新高（看跌背離），或
+    價格創新低但 RSI 未創新低（看漲背離）。
+    背離是趨勢即將反轉的強力訊號，勝率高於單純 RSI 閾值。
+    """
+    rsi_period = int(params.get("RSI 週期", 14))
+    div_window = int(params.get("背離觀察窗口", 20))
+    df = df.copy()
+
+    delta = df["Close"].diff()
+    gain  = delta.clip(lower=0).rolling(rsi_period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(rsi_period).mean()
+    rsi   = 100 - (100 / (1 + gain / loss))
+
+    # 看漲背離：價格新低但 RSI 沒有新低
+    price_low = df["Close"].rolling(div_window).min()
+    rsi_low   = rsi.rolling(div_window).min()
+    bullish_div = (
+        (df["Close"] <= price_low) &
+        (rsi > rsi_low * 1.02)    # RSI 比最低點高 2% 以上
+    ).fillna(False)
+
+    # 看跌背離：價格新高但 RSI 沒有新高
+    price_high = df["Close"].rolling(div_window).max()
+    rsi_high   = rsi.rolling(div_window).max()
+    bearish_div = (
+        (df["Close"] >= price_high) &
+        (rsi < rsi_high * 0.98)    # RSI 比最高點低 2% 以上
+    ).fillna(False)
+
+    buy  = bullish_div
+    sell = bearish_div
+
+    position, positions = 0, []
+    for i in range(len(df)):
+        if sell.iloc[i]:   position = 0
+        elif buy.iloc[i]:  position = 1
+        positions.append(position)
+    df["Position"] = positions
+    return df
+
+
+def parabolic_sar_strategy(df, params):
+    """
+    拋物線 SAR 策略 (Parabolic Stop And Reverse)：
+    自動追蹤趨勢，在趨勢反轉時自動切換方向。
+    SAR 在收盤價下方時為多頭，在上方時為空頭。
+    適合趨勢型市場，趨勢越強效果越好。
+    """
+    af_init = float(params.get("加速因子初始值", 0.02))
+    af_max  = float(params.get("加速因子上限", 0.2))
+    df = df.copy()
+
+    high  = df["High"].values
+    low   = df["Low"].values
+    close = df["Close"].values
+    n     = len(df)
+
+    sar    = [0.0] * n
+    ep     = [0.0] * n  # extreme point
+    af     = [af_init] * n
+    trend  = [1] * n    # 1=多頭, -1=空頭
+
+    # 初始化
+    sar[0]   = low[0]
+    ep[0]    = high[0]
+    trend[0] = 1
+
+    for i in range(1, n):
+        prev_sar   = sar[i-1]
+        prev_ep    = ep[i-1]
+        prev_af    = af[i-1]
+        prev_trend = trend[i-1]
+
+        # 計算新 SAR
+        new_sar = prev_sar + prev_af * (prev_ep - prev_sar)
+
+        if prev_trend == 1:  # 多頭
+            new_sar = min(new_sar, low[i-1], low[i-2] if i >= 2 else low[i-1])
+            if low[i] < new_sar:  # 反轉為空頭
+                trend[i] = -1
+                sar[i]   = prev_ep
+                ep[i]    = low[i]
+                af[i]    = af_init
+            else:
+                trend[i] = 1
+                sar[i]   = new_sar
+                if high[i] > prev_ep:
+                    ep[i] = high[i]
+                    af[i] = min(prev_af + af_init, af_max)
+                else:
+                    ep[i] = prev_ep
+                    af[i] = prev_af
+        else:  # 空頭
+            new_sar = max(new_sar, high[i-1], high[i-2] if i >= 2 else high[i-1])
+            if high[i] > new_sar:  # 反轉為多頭
+                trend[i] = 1
+                sar[i]   = prev_ep
+                ep[i]    = high[i]
+                af[i]    = af_init
+            else:
+                trend[i] = -1
+                sar[i]   = new_sar
+                if low[i] < prev_ep:
+                    ep[i] = low[i]
+                    af[i] = min(prev_af + af_init, af_max)
+                else:
+                    ep[i] = prev_ep
+                    af[i] = prev_af
+
+    df["SAR"]   = sar
+    df["Trend"] = trend
+
+    buy  = pd.Series(False, index=df.index)
+    sell = pd.Series(False, index=df.index)
+    trend_s = pd.Series(trend, index=df.index)
+    buy  = ((trend_s == 1)  & (trend_s.shift(1) == -1)).fillna(False)
+    sell = ((trend_s == -1) & (trend_s.shift(1) == 1)).fillna(False)
+
+    position, positions = 0, []
+    for i in range(len(df)):
+        if sell.iloc[i]:   position = 0
+        elif buy.iloc[i]:  position = 1
+        positions.append(position)
+    df["Position"] = positions
+    return df
+
+
 
 strategies.update({
     "SMA/Hull 趨勢策略": {
@@ -336,6 +558,26 @@ strategies.update({
         "description": "成交量加權均價（機構廣泛使用），收盤價從 VWAP 下方穿越時買入，跌破時賣出。",
         "parameters":  {"VWAP 週期": 20},
         "function":    vwap_strategy
+    },
+    "Ichimoku 一目均衡表策略": {
+        "description": "同時提供趨勢、動能、支撐阻力的複合指標。價格在雲上方且 Tenkan 上穿 Kijun 時買入，2025 年最受推薦的進階趨勢策略。",
+        "parameters":  {"Tenkan 週期": 9, "Kijun 週期": 26, "Senkou B 週期": 52},
+        "function":    ichimoku_strategy
+    },
+    "布林通道收縮突破策略": {
+        "description": "布林帶收縮至歷史低點（Squeeze）結束後方向性突破時進場，捕捉大波動啟動點。",
+        "parameters":  {"布林週期": 20, "布林倍數": 2.0, "KC 倍數": 1.5, "收縮判斷週期": 20},
+        "function":    bollinger_squeeze_strategy
+    },
+    "RSI 背離策略": {
+        "description": "價格創新低但 RSI 未創新低（看漲背離）時買入，價格創新高但 RSI 未創新高（看跌背離）時賣出。背離是趨勢反轉的強力訊號。",
+        "parameters":  {"RSI 週期": 14, "背離觀察窗口": 20},
+        "function":    rsi_divergence_strategy
+    },
+    "Parabolic SAR 策略": {
+        "description": "拋物線止損反轉指標，自動追蹤趨勢，SAR 在收盤下方為多頭，在上方為空頭，趨勢反轉時自動切換。",
+        "parameters":  {"加速因子初始值": 0.02, "加速因子上限": 0.2},
+        "function":    parabolic_sar_strategy
     },
 })
 
@@ -1040,6 +1282,59 @@ def generate_bot_code(
 """    import datetime as dt_
     interval   = int(p.get("買入間隔（天）", 7))
     is_bullish = (dt_.datetime.utcnow().timetuple().tm_yday % interval == 0)""",
+        "Ichimoku 一目均衡表策略":
+"""    tenkan_p = int(p.get("Tenkan 週期", 9))
+    kijun_p  = int(p.get("Kijun 週期", 26))
+    senkou_p = int(p.get("Senkou B 週期", 52))
+    def mid(h, l, n): return (h.rolling(n).max() + l.rolling(n).min()) / 2
+    tenkan  = mid(df["High"], df["Low"], tenkan_p)
+    kijun   = mid(df["High"], df["Low"], kijun_p)
+    span_a  = ((tenkan + kijun) / 2).shift(kijun_p)
+    span_b  = mid(df["High"], df["Low"], senkou_p).shift(kijun_p)
+    cloud_top = pd.concat([span_a, span_b], axis=1).max(axis=1)
+    is_bullish = bool((close.iloc[-1] > cloud_top.iloc[-1]) and (tenkan.iloc[-1] > kijun.iloc[-1]))""",
+        "布林通道收縮突破策略":
+"""    bb_period = int(p.get("布林週期", 20))
+    bb_mult   = float(p.get("布林倍數", 2.0))
+    kc_mult   = float(p.get("KC 倍數", 1.5))
+    ma   = close.rolling(bb_period).mean()
+    std  = close.rolling(bb_period).std()
+    bb_u = ma + bb_mult * std
+    bb_l = ma - bb_mult * std
+    bb_w = (bb_u - bb_l) / ma
+    tr   = pd.concat([high-low,(high-close.shift(1)).abs(),(low-close.shift(1)).abs()],axis=1).max(axis=1)
+    atr  = tr.rolling(bb_period).mean()
+    kc_u = ma + kc_mult * atr
+    kc_l = ma - kc_mult * atr
+    squeeze   = (bb_u < kc_u) & (bb_l > kc_l)
+    expanding = (bb_w.iloc[-1] > bb_w.iloc[-2]) and bool(squeeze.iloc[-2])
+    is_bullish = bool(expanding and (close.iloc[-1] > ma.iloc[-1]))""",
+        "RSI 背離策略":
+"""    rsi_p  = int(p.get("RSI 週期", 14))
+    div_w  = int(p.get("背離觀察窗口", 20))
+    delta  = close.diff()
+    gain   = delta.clip(lower=0).rolling(rsi_p).mean()
+    loss   = (-delta.clip(upper=0)).rolling(rsi_p).mean()
+    rsi    = 100 - (100 / (1 + gain/loss))
+    p_low  = close.rolling(div_w).min()
+    r_low  = rsi.rolling(div_w).min()
+    is_bullish = bool((close.iloc[-1] <= p_low.iloc[-1]) and (rsi.iloc[-1] > r_low.iloc[-1] * 1.02))""",
+        "Parabolic SAR 策略":
+"""    af_init = float(p.get("加速因子初始值", 0.02))
+    af_max  = float(p.get("加速因子上限", 0.2))
+    h = df["High"].values; l = df["Low"].values; c = df["Close"].values
+    sar = l[0]; ep = h[0]; af = af_init; tr_ = 1
+    for i in range(1, len(c)):
+        sar = sar + af * (ep - sar)
+        if tr_ == 1:
+            sar = min(sar, l[i-1])
+            if l[i] < sar: tr_ = -1; sar = ep; ep = l[i]; af = af_init
+            elif h[i] > ep: ep = h[i]; af = min(af + af_init, af_max)
+        else:
+            sar = max(sar, h[i-1])
+            if h[i] > sar: tr_ = 1; sar = ep; ep = h[i]; af = af_init
+            elif l[i] < ep: ep = l[i]; af = min(af + af_init, af_max)
+    is_bullish = (tr_ == 1)""",
     }
 
     strategy_logic = strategy_logic_map.get(strategy_name, strategy_logic_map["SMA/Hull 趨勢策略"])
